@@ -10,7 +10,7 @@ const kv = await Deno.openKv();
 const ADMIN_PASSWORD = Deno.env.get("ADMIN_PASSWORD");
 
 // Get port from environment variable, default to 8000
-const PORT = parseInt(Deno.env.get("PORT") || "8000");
+const PORT = parseInt(Deno.env.get("PORT") || "8100");
 
 console.log(`🔒 Password Protection: ${ADMIN_PASSWORD ? 'ENABLED' : 'DISABLED'}`);
 
@@ -1558,20 +1558,43 @@ const HTML_CONTENT = `
             icon.style.display = 'none';
             btnText.textContent = '加载中...';
 
-            fetch('/api/data?t=' + new Date().getTime())
+            // 先快速加载密钥列表，不等待额度数据
+            fetch('/api/keys')
                 .then(response => {
                     if (!response.ok) {
-                        throw new Error('无法加载数据: ' + response.statusText);
+                        throw new Error('无法加载密钥列表: ' + response.statusText);
                     }
                     return response.json();
                 })
-                .then(data => {
-                    if (data.error) {
-                        throw new Error(data.error);
-                    }
-                    displayData(data);
-                    // 重置自动刷新计时器
-                    resetAutoRefresh();
+                .then(keys => {
+                    // 立即显示密钥列表的占位符
+                    const beijingTime = new Date(Date.now() + 8 * 60 * 60 * 1000);
+                    const timeStr = beijingTime.toISOString().replace('T', ' ').substring(0, 19);
+
+                    allData = {
+                        update_time: timeStr,
+                        total_count: keys.length,
+                        totals: {
+                            total_totalAllowance: 0,
+                            total_orgTotalTokensUsed: 0
+                        },
+                        data: keys.map(k => ({
+                            id: k.id,
+                            key: k.masked,
+                            loading: true,
+                            totalAllowance: 0,
+                            orgTotalTokensUsed: 0,
+                            startDate: '加载中...',
+                            endDate: '加载中...',
+                            usedRatio: 0
+                        }))
+                    };
+
+                    // 立即渲染表格骨架
+                    displayData(allData);
+
+                    // 然后异步加载每个密钥的额度数据
+                    return loadUsageDataProgressively(keys);
                 })
                 .catch(error => {
                     document.getElementById('tableContent').innerHTML = \`<div class="error"><iconify-icon icon="lucide:alert-circle"></iconify-icon> 加载失败: \${error.message}</div>\`;
@@ -1584,14 +1607,150 @@ const HTML_CONTENT = `
                 });
         }
 
+        // 渐进式加载额度数据
+        async function loadUsageDataProgressively(keys) {
+            let completedCount = 0;
+            const totalCount = keys.length;
+
+            console.log('[loadUsageDataProgressively] 开始加载 ' + totalCount + ' 个密钥的额度数据');
+
+            // 并发加载，但限制并发数量
+            const concurrency = 5; // 同时最多5个请求
+            const results = [];
+
+            for (let i = 0; i < keys.length; i += concurrency) {
+                const batch = keys.slice(i, i + concurrency);
+                console.log('[loadUsageDataProgressively] 处理批次 ' + (Math.floor(i / concurrency) + 1) + '，包含 ' + batch.length + ' 个密钥');
+
+                const batchPromises = batch.map(async (keyEntry) => {
+                    console.log('[Key ' + keyEntry.id + '] 开始加载');
+                    try {
+                        // 调用后端 API 获取使用数据(后端会代理到 Factory.ai)
+                        console.log('[Key ' + keyEntry.id + '] 获取额度数据...');
+                        const usageResponse = await fetch('/api/keys/' + keyEntry.id + '/usage');
+                        console.log('[Key ' + keyEntry.id + '] 额度数据响应状态: ' + usageResponse.status);
+
+                        if (!usageResponse.ok) {
+                            const errorData = await usageResponse.json();
+                            console.error('[Key ' + keyEntry.id + '] 额度API返回错误: ' + usageResponse.status + ', 内容: ' + JSON.stringify(errorData));
+                            return {
+                                id: keyEntry.id,
+                                key: keyEntry.masked,
+                                error: 'HTTP ' + usageResponse.status
+                            };
+                        }
+
+                        const apiData = await usageResponse.json();
+                        console.log('[Key ' + keyEntry.id + '] 额度数据结构:', Object.keys(apiData));
+
+                        if (!apiData.usage || !apiData.usage.standard) {
+                            console.error('[Key ' + keyEntry.id + '] 额度数据结构无效:', apiData);
+                            return {
+                                id: keyEntry.id,
+                                key: keyEntry.masked,
+                                error: 'Invalid response'
+                            };
+                        }
+
+                        const usageInfo = apiData.usage;
+                        const standardUsage = usageInfo.standard;
+
+                        const formatDate = (timestamp) => {
+                            if (!timestamp && timestamp !== 0) return 'N/A';
+                            try {
+                                return new Date(timestamp).toISOString().split('T')[0];
+                            } catch (e) {
+                                return 'Invalid Date';
+                            }
+                        };
+
+                        console.log('[Key ' + keyEntry.id + '] ✅ 加载成功 - 总额度: ' + standardUsage.totalAllowance + ', 已使用: ' + standardUsage.orgTotalTokensUsed);
+
+                        return {
+                            id: keyEntry.id,
+                            key: keyEntry.masked,
+                            startDate: formatDate(usageInfo.startDate),
+                            endDate: formatDate(usageInfo.endDate),
+                            orgTotalTokensUsed: standardUsage.orgTotalTokensUsed,
+                            totalAllowance: standardUsage.totalAllowance,
+                            usedRatio: standardUsage.usedRatio,
+                        };
+                    } catch (error) {
+                        console.error('[Key ' + keyEntry.id + '] ❌ 加载失败:', error);
+                        console.error('[Key ' + keyEntry.id + '] 错误详情:', {
+                            name: error.name,
+                            message: error.message,
+                            stack: error.stack
+                        });
+                        return {
+                            id: keyEntry.id,
+                            key: keyEntry.masked,
+                            error: error.message || 'Failed to fetch'
+                        };
+                    }
+                });
+
+                // 等待当前批次完成
+                const batchResults = await Promise.all(batchPromises);
+                results.push(...batchResults);
+
+                // 更新已完成的数据
+                completedCount += batchResults.length;
+                console.log('[loadUsageDataProgressively] 已完成 ' + completedCount + '/' + totalCount);
+
+                // 更新 allData
+                batchResults.forEach(result => {
+                    const index = allData.data.findIndex(item => item.id === result.id);
+                    if (index !== -1) {
+                        allData.data[index] = result;
+                    }
+                });
+
+                // 重新计算总计
+                const validResults = allData.data.filter(r => !r.error && !r.loading);
+                allData.totals = {
+                    total_totalAllowance: validResults.reduce((sum, r) => sum + (r.totalAllowance || 0), 0),
+                    total_orgTotalTokensUsed: validResults.reduce((sum, r) => sum + (r.orgTotalTokensUsed || 0), 0)
+                };
+
+                // 实时更新界面
+                displayData(allData);
+
+                // 更新进度提示
+                document.getElementById('updateTime').textContent = '加载中: ' + completedCount + '/' + totalCount + ' | 共 ' + totalCount + ' 个API Key';
+            }
+
+            console.log('[loadUsageDataProgressively] ✅ 全部加载完成！成功: ' + results.filter(r => !r.error).length + ', 失败: ' + results.filter(r => r.error).length);
+
+            // 全部完成后重置自动刷新
+            resetAutoRefresh();
+
+            return results;
+        }
+
         function displayData(data) {
             allData = data; // 保存数据
-            document.getElementById('updateTime').textContent = \`最后更新: \${data.update_time} | 共 \${data.total_count} 个API Key\`;
+
+            // 如果还有加载中的项，显示进度
+            const loadingCount = data.data.filter(item => item.loading).length;
+            if (loadingCount > 0) {
+                document.getElementById('updateTime').textContent = '加载中: ' + (data.total_count - loadingCount) + '/' + data.total_count + ' | 共 ' + data.total_count + ' 个API Key';
+            } else {
+                document.getElementById('updateTime').textContent = '最后更新: ' + data.update_time + ' | 共 ' + data.total_count + ' 个API Key';
+            }
 
             const totalAllowance = data.totals.total_totalAllowance;
             const totalUsed = data.totals.total_orgTotalTokensUsed;
             const totalRemaining = totalAllowance - totalUsed;
             const overallRatio = totalAllowance > 0 ? totalUsed / totalAllowance : 0;
+
+            // 计算有效和无效密钥数量（排除加载中和错误的）
+            const completedData = data.data.filter(item => !item.loading && !item.error);
+            const validKeysCount = completedData.filter(item => {
+                const remaining = item.totalAllowance - item.orgTotalTokensUsed;
+                return remaining > 0;
+            }).length;
+            const invalidKeysCount = completedData.length - validKeysCount;
 
             const statsCards = document.getElementById('statsCards');
             statsCards.innerHTML = \`
@@ -1599,6 +1758,8 @@ const HTML_CONTENT = `
                 <div class="stat-card"><div class="label">已使用 (Total Used)</div><div class="value">\${formatNumber(totalUsed)}</div></div>
                 <div class="stat-card"><div class="label">剩余额度 (Remaining)</div><div class="value">\${formatNumber(totalRemaining)}</div></div>
                 <div class="stat-card"><div class="label">使用百分比 (Usage %)</div><div class="value">\${formatPercentage(overallRatio)}</div></div>
+                <div class="stat-card"><div class="label">有效密钥 (Valid Keys)</div><div class="value" style="color: hsl(var(--success));">\${validKeysCount}\${loadingCount > 0 ? '<span style="font-size: 0.875rem; opacity: 0.7; margin-left: 0.25rem;">(' + completedData.length + '/' + data.total_count + ')</span>' : ''}</div></div>
+                <div class="stat-card"><div class="label">无效密钥 (Invalid Keys)</div><div class="value" style="color: hsl(var(--destructive));">\${invalidKeysCount}</div></div>
             \`;
 
             renderTable();
@@ -1630,7 +1791,7 @@ const HTML_CONTENT = `
                             <th class="number">已使用</th>
                             <th class="number">剩余额度</th>
                             <th class="number">使用百分比</th>
-                            <th style="text-align: center;">操作</th>
+                            <th style="text-align: center; width: 100px;">操作</th>
                         </tr>
                     </thead>
                     <tbody>\`;
@@ -1648,13 +1809,37 @@ const HTML_CONTENT = `
 
             // 数据行 - 只显示当前页
             pageData.forEach(item => {
-                if (item.error) {
+                if (item.loading) {
+                    // 加载中状态
+                    tableHTML += \`
+                        <tr style="opacity: 0.6;">
+                            <td>\${item.id}</td>
+                            <td class="key-cell" title="\${item.key}">\${item.key}</td>
+                            <td colspan="6" style="text-align: center; color: hsl(var(--muted-foreground));"><span class="spinner" style="display: inline-block; margin-right: 8px;"></span>加载额度数据中...</td>
+                            <td style="text-align: center;">
+                                <button class="table-delete-btn" onclick="deleteKeyFromTable('\${item.id}')" style="background: hsl(var(--destructive));" title="删除密钥">
+                                    <iconify-icon icon="lucide:trash-2" style="font-size: 12px;"></iconify-icon>
+                                </button>
+                            </td>
+                        </tr>\`;
+                } else if (item.error) {
                     tableHTML += \`
                         <tr>
                             <td>\${item.id}</td>
                             <td class="key-cell" title="\${item.key}">\${item.key}</td>
-                            <td colspan="6" class="error-row">加载失败: \${item.error}</td>
-                            <td style="text-align: center;"><button class="table-delete-btn" onclick="deleteKeyFromTable('\${item.id}')">删除</button></td>
+                            <td colspan="6" class="error-row">
+                                加载失败: \${item.error}
+                            </td>
+                            <td style="text-align: center;">
+                                <div style="display: flex; gap: 8px; justify-content: center; align-items: center;">
+                                    <button class="table-delete-btn" onclick="refreshSingleKey('\${item.id}')" style="background: hsl(var(--warning));" title="重试">
+                                        <iconify-icon icon="lucide:refresh-cw" style="font-size: 12px;"></iconify-icon>
+                                    </button>
+                                    <button class="table-delete-btn" onclick="deleteKeyFromTable('\${item.id}')" style="background: hsl(var(--destructive));" title="删除密钥">
+                                        <iconify-icon icon="lucide:trash-2" style="font-size: 12px;"></iconify-icon>
+                                    </button>
+                                </div>
+                            </td>
                         </tr>\`;
                 } else {
                     const remaining = item.totalAllowance - item.orgTotalTokensUsed;
@@ -1668,7 +1853,16 @@ const HTML_CONTENT = `
                             <td class="number">\${formatNumber(item.orgTotalTokensUsed)}</td>
                             <td class="number">\${formatNumber(remaining)}</td>
                             <td class="number">\${formatPercentage(item.usedRatio)}</td>
-                            <td style="text-align: center;"><button class="table-delete-btn" onclick="deleteKeyFromTable('\${item.id}')">删除</button></td>
+                            <td style="text-align: center;">
+                                <div style="display: flex; gap: 8px; justify-content: center; align-items: center;">
+                                    <button class="table-delete-btn" onclick="refreshSingleKey('\${item.id}')" style="background: hsl(var(--primary));" title="刷新此密钥">
+                                        <iconify-icon icon="lucide:refresh-cw" style="font-size: 12px;"></iconify-icon>
+                                    </button>
+                                    <button class="table-delete-btn" onclick="deleteKeyFromTable('\${item.id}')" style="background: hsl(var(--destructive));" title="删除密钥">
+                                        <iconify-icon icon="lucide:trash-2" style="font-size: 12px;"></iconify-icon>
+                                    </button>
+                                </div>
+                            </td>
                         </tr>\`;
                 }
             });
@@ -1855,6 +2049,111 @@ const HTML_CONTENT = `
             }
         }
 
+        // 刷新单个密钥的数据
+        async function refreshSingleKey(keyId) {
+            if (!allData) return;
+
+            // 找到这个密钥在 allData 中的位置
+            const index = allData.data.findIndex(item => item.id === keyId);
+            if (index === -1) return;
+
+            // 先获取密钥的基本信息
+            try {
+                const keyInfoResponse = await fetch('/api/keys');
+                if (!keyInfoResponse.ok) {
+                    throw new Error('无法获取密钥信息');
+                }
+                const allKeys = await keyInfoResponse.json();
+                const keyInfo = allKeys.find(k => k.id === keyId);
+
+                if (!keyInfo) {
+                    alert('找不到该密钥');
+                    return;
+                }
+
+                // 设置为加载中状态
+                allData.data[index] = {
+                    id: keyId,
+                    key: keyInfo.masked,
+                    loading: true,
+                    totalAllowance: 0,
+                    orgTotalTokensUsed: 0,
+                    startDate: '加载中...',
+                    endDate: '加载中...',
+                    usedRatio: 0
+                };
+
+                // 立即更新界面
+                displayData(allData);
+
+                // 调用后端 API 获取使用数据
+                const usageResponse = await fetch('/api/keys/' + keyId + '/usage');
+
+                if (!usageResponse.ok) {
+                    allData.data[index] = {
+                        id: keyId,
+                        key: keyInfo.masked,
+                        error: 'HTTP ' + usageResponse.status
+                    };
+                    displayData(allData);
+                    return;
+                }
+
+                const apiData = await usageResponse.json();
+                if (!apiData.usage || !apiData.usage.standard) {
+                    allData.data[index] = {
+                        id: keyId,
+                        key: keyInfo.masked,
+                        error: 'Invalid response'
+                    };
+                    displayData(allData);
+                    return;
+                }
+
+                const usageInfo = apiData.usage;
+                const standardUsage = usageInfo.standard;
+
+                const formatDate = (timestamp) => {
+                    if (!timestamp && timestamp !== 0) return 'N/A';
+                    try {
+                        return new Date(timestamp).toISOString().split('T')[0];
+                    } catch (e) {
+                        return 'Invalid Date';
+                    }
+                };
+
+                // 更新数据
+                allData.data[index] = {
+                    id: keyId,
+                    key: keyInfo.masked,
+                    startDate: formatDate(usageInfo.startDate),
+                    endDate: formatDate(usageInfo.endDate),
+                    orgTotalTokensUsed: standardUsage.orgTotalTokensUsed,
+                    totalAllowance: standardUsage.totalAllowance,
+                    usedRatio: standardUsage.usedRatio,
+                };
+
+                // 重新计算总计
+                const validResults = allData.data.filter(r => !r.error && !r.loading);
+                allData.totals = {
+                    total_totalAllowance: validResults.reduce((sum, r) => sum + (r.totalAllowance || 0), 0),
+                    total_orgTotalTokensUsed: validResults.reduce((sum, r) => sum + (r.orgTotalTokensUsed || 0), 0)
+                };
+
+                // 更新界面
+                displayData(allData);
+
+            } catch (error) {
+                console.error(\`刷新密钥 \${keyId} 失败:\`, error);
+                allData.data[index] = {
+                    id: keyId,
+                    key: allData.data[index].key,
+                    error: error.message || 'Failed to fetch'
+                };
+                displayData(allData);
+            }
+        }
+
         // Check for duplicate keys - 检测重复密钥
         async function checkDuplicates() {
             const spinner = document.getElementById('checkDupSpinner');
@@ -1966,56 +2265,7 @@ const HTML_CONTENT = `
             }
         }
 
-        // 获取零额度密钥的完整key列表
-        async function getZeroBalanceKeysFullList() {
-            if (!allData) {
-                return [];
-            }
-
-            // 找出剩余额度小于等于0的密钥ID
-            const zeroBalanceIds = allData.data
-                .filter(item => {
-                    if (item.error) return false;
-                    const remaining = item.totalAllowance - item.orgTotalTokensUsed;
-                    return remaining <= 0;
-                })
-                .map(item => item.id);
-
-            if (zeroBalanceIds.length === 0) {
-                return [];
-            }
-
-            // 从服务器获取完整的key列表
-            try {
-                const response = await fetch('/api/keys');
-                if (!response.ok) {
-                    throw new Error('无法获取密钥列表');
-                }
-
-                const allKeys = await response.json();
-
-                // 筛选出零额度的完整key
-                const zeroKeys = [];
-                for (const id of zeroBalanceIds) {
-                    const fullKeyEntry = allKeys.find(k => k.id === id);
-                    if (fullKeyEntry) {
-                        // 获取完整key需要从数据库读取
-                        const keyResponse = await fetch(\`/api/keys/\${id}/full\`);
-                        if (keyResponse.ok) {
-                            const keyData = await keyResponse.json();
-                            zeroKeys.push(keyData.key);
-                        }
-                    }
-                }
-
-                return zeroKeys;
-            } catch (error) {
-                console.error('获取零额度密钥失败:', error);
-                return [];
-            }
-        }
-
-        // 打开导出零额度弹窗
+        // 打开导出零额度弹窗 - 直接从allData中获取，无需重新调用API
         async function openExportZeroModal() {
             if (!allData) {
                 alert('请先加载数据');
@@ -2029,25 +2279,44 @@ const HTML_CONTENT = `
             // 显示弹窗
             modal.style.display = 'flex';
 
+            // 直接从已有数据中筛选零额度密钥（剩余额度 ≤ 0）
+            const zeroBalanceItems = allData.data.filter(item => {
+                if (item.error) return false;
+                const remaining = item.totalAllowance - item.orgTotalTokensUsed;
+                return remaining <= 0;
+            });
+
+            if (zeroBalanceItems.length === 0) {
+                info.innerHTML = '<iconify-icon icon="lucide:check-circle" style="color: hsl(var(--success));\"></iconify-icon> 太棒了！没有零额度密钥';
+                textarea.value = '';
+                textarea.placeholder = '暂无零额度密钥';
+                return;
+            }
+
             // 设置加载状态
-            info.innerHTML = '<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在加载零额度密钥...';
+            info.innerHTML = \`<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在获取 \${zeroBalanceItems.length} 个零额度密钥...\`;
             textarea.value = '';
 
-            // 获取零额度的密钥
+            // 获取完整密钥
             try {
-                const zeroKeys = await getZeroBalanceFullKeys();
-
-                if (zeroKeys.length === 0) {
-                    info.innerHTML = '<iconify-icon icon="lucide:check-circle" style="color: hsl(var(--success));"></iconify-icon> 太棒了！没有零额度密钥';
-                    textarea.value = '';
-                    textarea.placeholder = '暂无零额度密钥';
-                } else {
-                    info.innerHTML = \`<iconify-icon icon="lucide:info" style="color: hsl(var(--warning));"></iconify-icon> 找到 <strong>\${zeroKeys.length}</strong> 个零额度密钥(剩余额度 ≤ 0)\`;
-                    textarea.value = zeroKeys.join('\\n');
-                    textarea.placeholder = '';
+                const fullKeys = [];
+                for (const item of zeroBalanceItems) {
+                    try {
+                        const response = await fetch(\`/api/keys/\${item.id}/full\`);
+                        if (response.ok) {
+                            const data = await response.json();
+                            fullKeys.push(data.key);
+                        }
+                    } catch (error) {
+                        console.error(\`获取密钥 \${item.id} 失败:\`, error);
+                    }
                 }
+
+                info.innerHTML = \`<iconify-icon icon="lucide:info" style="color: hsl(var(--warning));\"></iconify-icon> 找到 <strong>\${fullKeys.length}</strong> 个零额度密钥(剩余额度 ≤ 0)\`;
+                textarea.value = fullKeys.join('\\n');
+                textarea.placeholder = '';
             } catch (error) {
-                info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--destructive));"></iconify-icon> 加载失败: ' + error.message;
+                info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--destructive));\"></iconify-icon> 加载失败: ' + error.message;
                 textarea.value = '';
             }
         }
@@ -2086,7 +2355,7 @@ const HTML_CONTENT = `
             return fullKeys;
         }
 
-        // 获取有效密钥（剩余额度>0）
+        // 获取有效密钥（剩余额度>0）- 直接从allData中获取，无需重新调用API
         async function getValidBalanceFullKeys() {
             if (!allData) {
                 return [];
@@ -2134,23 +2403,42 @@ const HTML_CONTENT = `
             // 显示弹窗
             modal.style.display = 'flex';
 
+            // 直接从已有数据中筛选有效密钥（剩余额度 > 0）
+            const validBalanceItems = allData.data.filter(item => {
+                if (item.error) return false;
+                const remaining = item.totalAllowance - item.orgTotalTokensUsed;
+                return remaining > 0;
+            });
+
+            if (validBalanceItems.length === 0) {
+                info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--warning));\"></iconify-icon> 没有找到有效密钥（剩余额度 > 0）';
+                textarea.value = '';
+                textarea.placeholder = '暂无有效密钥';
+                return;
+            }
+
             // 设置加载状态
-            info.innerHTML = '<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在加载有效密钥...';
+            info.innerHTML = \`<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在获取 \${validBalanceItems.length} 个有效密钥...\`;
             textarea.value = '';
 
-            // 获取有效的密钥
+            // 获取完整密钥
             try {
-                const validKeys = await getValidBalanceFullKeys();
-
-                if (validKeys.length === 0) {
-                    info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--warning));\"></iconify-icon> 没有找到有效密钥（剩余额度 > 0）';
-                    textarea.value = '';
-                    textarea.placeholder = '暂无有效密钥';
-                } else {
-                    info.innerHTML = \`<iconify-icon icon="lucide:check-circle" style="color: hsl(var(--success));\"></iconify-icon> 找到 <strong>\${validKeys.length}</strong> 个有效密钥(剩余额度 > 0)\`;
-                    textarea.value = validKeys.join('\\n');
-                    textarea.placeholder = '';
+                const fullKeys = [];
+                for (const item of validBalanceItems) {
+                    try {
+                        const response = await fetch(\`/api/keys/\${item.id}/full\`);
+                        if (response.ok) {
+                            const data = await response.json();
+                            fullKeys.push(data.key);
+                        }
+                    } catch (error) {
+                        console.error(\`获取密钥 \${item.id} 失败:\`, error);
+                    }
                 }
+
+                info.innerHTML = \`<iconify-icon icon="lucide:check-circle" style="color: hsl(var(--success));\"></iconify-icon> 找到 <strong>\${fullKeys.length}</strong> 个有效密钥(剩余额度 > 0)\`;
+                textarea.value = fullKeys.join('\\n');
+                textarea.placeholder = '';
             } catch (error) {
                 info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--destructive));\"></iconify-icon> 加载失败: ' + error.message;
                 textarea.value = '';
@@ -2739,6 +3027,56 @@ async function handler(req: Request): Promise<Response> {
       }
 
       return new Response(JSON.stringify({ key: keyEntry.key }), { headers });
+    } catch (error) {
+      return new Response(JSON.stringify({ error: error.message }), {
+        status: 500,
+        headers,
+      });
+    }
+  }
+
+  // Get usage data for a specific key (proxy to Factory.ai API)
+  if (url.pathname.match(/^\/api\/keys\/[^/]+\/usage$/) && req.method === "GET") {
+    try {
+      const pathParts = url.pathname.split("/");
+      const id = pathParts[pathParts.length - 2];
+
+      if (!id) {
+        return new Response(JSON.stringify({ error: "Key ID required" }), {
+          status: 400,
+          headers,
+        });
+      }
+
+      const keyEntry = await getApiKey(id);
+      if (!keyEntry) {
+        return new Response(JSON.stringify({ error: "Key not found" }), {
+          status: 404,
+          headers,
+        });
+      }
+
+      // Call Factory.ai API from server side to avoid CORS
+      const response = await fetch('https://app.factory.ai/api/organization/members/chat-usage', {
+        headers: {
+          'Authorization': `Bearer ${keyEntry.key}`,
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return new Response(JSON.stringify({
+          error: `Factory.ai API error: ${response.status}`,
+          details: errorText
+        }), {
+          status: response.status,
+          headers,
+        });
+      }
+
+      const usageData = await response.json();
+      return new Response(JSON.stringify(usageData), { headers });
     } catch (error) {
       return new Response(JSON.stringify({ error: error.message }), {
         status: 500,
