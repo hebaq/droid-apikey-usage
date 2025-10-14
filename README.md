@@ -2,6 +2,9 @@
 
 专为 **Deno Deploy** 设计的 API Key 管理系统。
 
+运行：
+deno run --allow-net --allow-env --unstable-kv main.ts
+
 ## ✨ 核心功能
 
 - 🔄 **Deno KV 持久化** - 全球分布式数据库

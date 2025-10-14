@@ -9,6 +9,9 @@ const kv = await Deno.openKv();
 // Get admin password from environment variable
 const ADMIN_PASSWORD = Deno.env.get("ADMIN_PASSWORD");
 
+// Get port from environment variable, default to 8000
+const PORT = parseInt(Deno.env.get("PORT") || "8000");
+
 console.log(`🔒 Password Protection: ${ADMIN_PASSWORD ? 'ENABLED' : 'DISABLED'}`);
 
 // Session Management
@@ -91,14 +94,57 @@ async function deleteApiKey(id: string): Promise<void> {
   await kv.delete(["apikeys", id]);
 }
 
-async function batchImportKeys(keys: string[]): Promise<{ success: number; failed: number }> {
+async function checkDuplicateKey(key: string): Promise<boolean> {
+  const allKeys = await getAllApiKeys();
+  return allKeys.some(entry => entry.key === key);
+}
+
+// Find duplicate keys in existing database
+async function findDuplicateKeys(): Promise<{ duplicates: Array<{ key: string; ids: string[]; count: number }> }> {
+  const allKeys = await getAllApiKeys();
+  const keyMap = new Map<string, string[]>();
+
+  // Group keys by their value
+  for (const entry of allKeys) {
+    const existing = keyMap.get(entry.key) || [];
+    existing.push(entry.id);
+    keyMap.set(entry.key, existing);
+  }
+
+  // Find duplicates (keys that appear more than once)
+  const duplicates: Array<{ key: string; ids: string[]; count: number }> = [];
+  for (const [key, ids] of keyMap.entries()) {
+    if (ids.length > 1) {
+      duplicates.push({
+        key: `${key.substring(0, 4)}...${key.substring(key.length - 4)}`,
+        ids,
+        count: ids.length
+      });
+    }
+  }
+
+  return { duplicates };
+}
+
+async function batchImportKeys(keys: string[]): Promise<{ success: number; failed: number; duplicates: number; duplicateKeys: string[] }> {
   let success = 0;
   let failed = 0;
+  let duplicates = 0;
+  const duplicateKeys: string[] = [];
 
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i].trim();
     if (key.length > 0) {
       try {
+        // Check for duplicate
+        const isDuplicate = await checkDuplicateKey(key);
+        if (isDuplicate) {
+          duplicates++;
+          duplicateKeys.push(`${key.substring(0, 4)}...${key.substring(key.length - 4)}`);
+          console.log(`Skipped duplicate key: ${key.substring(0, 4)}...`);
+          continue;
+        }
+
         const id = `key-${Date.now()}-${i}`;
         await saveApiKey(id, key);
         success++;
@@ -109,7 +155,7 @@ async function batchImportKeys(keys: string[]): Promise<{ success: number; faile
     }
   }
 
-  return { success, failed };
+  return { success, failed, duplicates, duplicateKeys };
 }
 
 // Login Page HTML
@@ -120,12 +166,36 @@ const LOGIN_PAGE = `
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>登录 - API 余额监控看板</title>
+    <script src="https://cdn.jsdelivr.net/npm/iconify-icon@2.1.0/dist/iconify-icon.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
+        :root {
+            --background: 0 0% 100%;
+            --foreground: 0 0% 20%;
+            --card: 0 0% 100%;
+            --card-foreground: 0 0% 20%;
+            --popover: 0 0% 100%;
+            --popover-foreground: 0 0% 20%;
+            --primary: 0 0% 30%;
+            --primary-foreground: 0 0% 98%;
+            --secondary: 0 0% 96.1%;
+            --secondary-foreground: 0 0% 30%;
+            --muted: 0 0% 96.1%;
+            --muted-foreground: 0 0% 55%;
+            --accent: 0 0% 96.1%;
+            --accent-foreground: 0 0% 30%;
+            --destructive: 0 72% 65%;
+            --destructive-foreground: 0 0% 98%;
+            --border: 0 0% 92%;
+            --input: 0 0% 92%;
+            --ring: 0 0% 60%;
+            --radius: 0.5rem;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', sans-serif;
-            background: linear-gradient(135deg, #007AFF 0%, #5856D6 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+            background: hsl(0 0% 99%);
             min-height: 100vh;
             display: flex;
             align-items: center;
@@ -134,10 +204,11 @@ const LOGIN_PAGE = `
         }
 
         .login-container {
-            background: white;
-            border-radius: 24px;
+            background: hsl(var(--card));
+            border: 1px solid hsl(var(--border));
+            border-radius: calc(var(--radius) * 2);
             padding: 48px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
             max-width: 400px;
             width: 100%;
             animation: slideUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
@@ -146,101 +217,111 @@ const LOGIN_PAGE = `
         @keyframes slideUp {
             from {
                 opacity: 0;
-                transform: translateY(40px) scale(0.95);
+                transform: translateY(20px);
             }
             to {
                 opacity: 1;
-                transform: translateY(0) scale(1);
+                transform: translateY(0);
             }
         }
 
         .login-icon {
-            font-size: 64px;
-            text-align: center;
-            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 24px;
+            background: hsl(var(--primary));
+            border-radius: var(--radius);
+        }
+
+        .login-icon iconify-icon {
+            font-size: 32px;
+            color: hsl(var(--primary-foreground));
         }
 
         h1 {
-            font-size: 28px;
-            font-weight: 700;
+            font-size: 24px;
+            font-weight: 600;
             text-align: center;
-            color: #1D1D1F;
-            margin-bottom: 12px;
-            letter-spacing: -0.5px;
+            color: hsl(var(--foreground));
+            margin-bottom: 8px;
+            letter-spacing: -0.03em;
         }
 
         p {
             text-align: center;
-            color: #86868B;
+            color: hsl(var(--muted-foreground));
             margin-bottom: 32px;
-            font-size: 15px;
+            font-size: 14px;
         }
 
         .form-group {
-            margin-bottom: 24px;
+            margin-bottom: 16px;
         }
 
         label {
             display: block;
-            font-size: 13px;
-            font-weight: 600;
-            color: #1D1D1F;
+            font-size: 14px;
+            font-weight: 500;
+            color: hsl(var(--foreground));
             margin-bottom: 8px;
-            text-transform: uppercase;
-            letter-spacing: 0.3px;
         }
 
         input[type="password"] {
             width: 100%;
-            padding: 16px;
-            border: 1.5px solid rgba(0, 0, 0, 0.06);
-            border-radius: 12px;
-            font-size: 16px;
-            transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            padding: 10px 12px;
+            background: hsl(var(--background));
+            border: 1px solid hsl(var(--input));
+            border-radius: var(--radius);
+            font-size: 14px;
+            transition: all 0.2s;
+            color: hsl(var(--foreground));
         }
 
         input[type="password"]:focus {
             outline: none;
-            border-color: #007AFF;
-            box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.1);
+            border-color: hsl(var(--ring));
+            box-shadow: 0 0 0 3px hsl(var(--ring) / 0.1);
         }
 
         .login-btn {
             width: 100%;
-            padding: 16px;
-            background: #007AFF;
-            color: white;
+            padding: 12px 16px;
+            background: hsl(0 0% 40%);
+            color: hsl(var(--background));
             border: none;
-            border-radius: 12px;
-            font-size: 16px;
+            border-radius: var(--radius);
+            font-size: 14px;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+            transition: all 0.2s;
         }
 
         .login-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(0, 122, 255, 0.3);
+            background: hsl(0 0% 35%);
         }
 
         .login-btn:active {
-            transform: translateY(0);
+            transform: scale(0.98);
         }
 
         .error-message {
-            background: rgba(255, 59, 48, 0.1);
-            color: #FF3B30;
+            background: hsl(var(--destructive) / 0.1);
+            color: hsl(var(--destructive));
             padding: 12px 16px;
-            border-radius: 8px;
+            border-radius: var(--radius);
             font-size: 14px;
             margin-bottom: 16px;
-            border: 1px solid rgba(255, 59, 48, 0.2);
+            border: 1px solid hsl(var(--destructive) / 0.2);
             display: none;
+            align-items: center;
+            gap: 8px;
         }
 
         .error-message.show {
-            display: block;
+            display: flex;
             animation: shake 0.4s;
         }
 
@@ -253,12 +334,15 @@ const LOGIN_PAGE = `
 </head>
 <body>
     <div class="login-container">
-        <div class="login-icon">🔐</div>
+        <div class="login-icon">
+            <iconify-icon icon="lucide:lock-keyhole"></iconify-icon>
+        </div>
         <h1>欢迎回来</h1>
         <p>请输入管理员密码以访问系统</p>
 
         <div class="error-message" id="errorMessage">
-            密码错误，请重试
+            <iconify-icon icon="lucide:alert-circle"></iconify-icon>
+            <span>密码错误,请重试</span>
         </div>
 
         <form onsubmit="handleLogin(event)">
@@ -324,31 +408,34 @@ const HTML_CONTENT = `
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Droid API 余额监控看板</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/iconify-icon@2.1.0/dist/iconify-icon.min.js"></script>
     <style>
-        /* Apple-inspired Design System with FiraCode */
         :root {
-            --color-primary: #007AFF;
-            --color-secondary: #5856D6;
-            --color-success: #34C759;
-            --color-warning: #FF9500;
-            --color-danger: #FF3B30;
-            --color-bg: #F5F5F7;
-            --color-surface: #FFFFFF;
-            --color-text-primary: #1D1D1F;
-            --color-text-secondary: #86868B;
-            --color-border: rgba(0, 0, 0, 0.06);
-            --color-shadow: rgba(0, 0, 0, 0.08);
-            --radius-sm: 8px;
-            --radius-md: 12px;
-            --radius-lg: 18px;
-            --radius-xl: 24px;
-            --spacing-xs: 8px;
-            --spacing-sm: 12px;
-            --spacing-md: 16px;
-            --spacing-lg: 24px;
-            --spacing-xl: 32px;
-            --transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+            --background: 0 0% 100%;
+            --foreground: 222.2 84% 4.9%;
+            --card: 0 0% 100%;
+            --card-foreground: 222.2 84% 4.9%;
+            --popover: 0 0% 100%;
+            --popover-foreground: 222.2 84% 4.9%;
+            --primary: 221.2 83.2% 53.3%;
+            --primary-foreground: 210 40% 98%;
+            --secondary: 210 40% 96.1%;
+            --secondary-foreground: 222.2 47.4% 11.2%;
+            --muted: 210 40% 96.1%;
+            --muted-foreground: 215.4 16.3% 46.9%;
+            --accent: 210 40% 96.1%;
+            --accent-foreground: 222.2 47.4% 11.2%;
+            --destructive: 0 84.2% 60.2%;
+            --destructive-foreground: 210 40% 98%;
+            --border: 214.3 31.8% 91.4%;
+            --input: 214.3 31.8% 91.4%;
+            --ring: 221.2 83.2% 53.3%;
+            --radius: 0.5rem;
+            --success: 142 71% 45%;
+            --success-foreground: 0 0% 100%;
+            --warning: 38 92% 50%;
+            --warning-foreground: 0 0% 100%;
         }
 
         * {
@@ -358,15 +445,12 @@ const HTML_CONTENT = `
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Segoe UI', sans-serif;
-            background: var(--color-bg);
-            min-height: 100vh;
-            padding: var(--spacing-lg);
-            color: var(--color-text-primary);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background-color: hsl(var(--background));
+            color: hsl(var(--foreground));
             line-height: 1.5;
             -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
-            text-rendering: optimizeLegibility;
+            padding: 1.5rem;
         }
 
         /* FiraCode for code/numbers - Scale 1.25x and anti-aliasing */
@@ -379,79 +463,85 @@ const HTML_CONTENT = `
         }
 
         .container {
-            max-width: 2400px;
+            max-width: 1400px;
             margin: 0 auto;
-            background: var(--color-surface);
-            border-radius: var(--radius-xl);
-            box-shadow: 0 8px 30px var(--color-shadow);
+            background: hsl(var(--card));
+            border: 1px solid hsl(var(--border));
+            border-radius: calc(var(--radius) + 2px);
+            box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
             overflow: hidden;
         }
 
         .header {
             position: relative;
-            background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
-            color: white;
-            padding: var(--spacing-xl) var(--spacing-lg);
+            background: hsl(var(--primary));
+            color: hsl(var(--primary-foreground));
+            padding: 1.5rem 2rem;
             text-align: center;
+            border-bottom: 1px solid hsl(var(--border));
         }
 
         .header h1 {
-            font-size: 48px;
-            font-weight: 700;
-            letter-spacing: -0.5px;
-            margin-bottom: var(--spacing-xs);
+            font-size: 1.5rem;
+            font-weight: 600;
+            line-height: 1;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
         }
 
         .header .update-time {
-            font-size: 20px;
-            opacity: 0.85;
+            font-size: 0.875rem;
+            opacity: 0.9;
             font-weight: 400;
         }
 
         .stats-cards {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: var(--spacing-lg);
-            padding: var(--spacing-xl);
-            background: var(--color-bg);
+            gap: 1.5rem;
+            padding: 1.5rem;
+            background: transparent;
         }
 
         .stat-card {
-            background: var(--color-surface);
-            border-radius: var(--radius-lg);
-            padding: calc(var(--spacing-lg) * 1.25);
+            background: hsl(var(--card));
+            border: 1px solid hsl(var(--border));
+            border-radius: var(--radius);
+            padding: 1.5rem;
             text-align: center;
-            border: 1px solid var(--color-border);
-            transition: var(--transition);
+            transition: all 0.15s;
+            box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
         }
 
         .stat-card:hover {
-            transform: translateY(-4px) scale(1.02);
-            box-shadow: 0 12px 40px var(--color-shadow);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            border-color: hsl(var(--ring) / 0.5);
         }
 
         .stat-card .label {
-            font-size: 18px;
-            color: var(--color-text-secondary);
-            margin-bottom: var(--spacing-sm);
+            font-size: 0.875rem;
+            color: hsl(var(--muted-foreground));
+            margin-bottom: 0.75rem;
             font-weight: 500;
-            letter-spacing: 0.3px;
+            letter-spacing: 0.025em;
             text-transform: uppercase;
         }
 
         .stat-card .value {
-            font-size: 56px;
+            font-size: 2rem;
             font-weight: 600;
-            background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'San Francisco', sans-serif;
+            color: hsl(var(--primary));
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             font-variant-numeric: tabular-nums;
+            letter-spacing: -0.02em;
         }
 
         .table-container {
-            padding: 0 var(--spacing-xl) var(--spacing-xl);
+            padding: 0 32px 32px;
             overflow-x: visible;
         }
 
@@ -459,27 +549,30 @@ const HTML_CONTENT = `
             width: 100%;
             border-collapse: separate;
             border-spacing: 0;
-            background: var(--color-surface);
-            border-radius: var(--radius-md);
+            background: hsl(var(--card));
+            border-radius: var(--radius);
             overflow: visible;
-            border: 1px solid var(--color-border);
-            margin-bottom: var(--spacing-xl);
+            border: 1px solid hsl(var(--border));
+            margin-bottom: 32px;
             table-layout: fixed;
+            box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
         }
 
         thead {
-            background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
-            color: white;
+            background: hsl(var(--muted));
+            color: hsl(var(--foreground));
         }
 
         th {
-            padding: var(--spacing-md);
+            padding: 1rem;
             text-align: left;
             font-weight: 600;
-            font-size: 16px;
+            font-size: 0.75rem;
             white-space: nowrap;
-            letter-spacing: 0.3px;
+            letter-spacing: 0.05em;
             text-transform: uppercase;
+            border-bottom: 1px solid hsl(var(--border));
+            color: hsl(var(--muted-foreground));
         }
 
         th.number { text-align: right; }
@@ -496,9 +589,9 @@ const HTML_CONTENT = `
         th:nth-child(9) { width: 8%; } /* 操作 */
 
         td {
-            padding: var(--spacing-md);
-            border-bottom: 1px solid var(--color-border);
-            font-size: 18px;
+            padding: 16px;
+            border-bottom: 1px solid hsl(var(--border));
+            font-size: 14px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -508,48 +601,52 @@ const HTML_CONTENT = `
             text-align: right;
             font-weight: 500;
             font-variant-numeric: tabular-nums;
-            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'San Francisco', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         }
 
-        td.error-row { color: var(--color-danger); }
+        td.error-row { color: hsl(var(--destructive)); }
 
-        tbody tr { transition: background-color 0.2s ease; }
-        tbody tr:hover { background-color: rgba(0, 122, 255, 0.04); }
+        tbody tr { transition: background-color 0.15s ease; }
+        tbody tr:hover { background-color: hsl(var(--muted) / 0.5); }
         tbody tr:last-child td { border-bottom: none; }
 
-        /* 总计行样式 - 独特颜色 */
+        /* 总计行样式 */
         .total-row {
-            background: linear-gradient(135deg, rgba(0, 122, 255, 0.08) 0%, rgba(88, 86, 214, 0.08) 100%);
-            font-weight: 700;
+            background: hsl(var(--accent));
+            font-weight: 600;
             position: sticky;
             top: 0;
             z-index: 10;
-            border-bottom: 2px solid var(--color-primary) !important;
+            border-bottom: 2px solid hsl(var(--primary)) !important;
         }
 
         .total-row td {
-            padding: calc(var(--spacing-md) * 1.2);
-            font-size: 20px;
-            color: var(--color-primary);
-            border-bottom: 2px solid var(--color-primary) !important;
+            padding: 1.25rem 1rem;
+            font-size: 0.9375rem;
+            color: hsl(var(--primary));
+            border-bottom: 2px solid hsl(var(--primary)) !important;
+            font-weight: 600;
         }
 
         /* 删除按钮样式 */
         .table-delete-btn {
-            background: var(--color-danger);
-            color: white;
+            background: hsl(var(--destructive));
+            color: hsl(var(--destructive-foreground));
             border: none;
-            border-radius: var(--radius-sm);
+            border-radius: calc(var(--radius) * 0.75);
             padding: 6px 12px;
             font-size: 12px;
-            font-weight: 600;
+            font-weight: 500;
             cursor: pointer;
-            transition: var(--transition);
+            transition: all 0.2s;
             white-space: nowrap;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
         }
 
         .table-delete-btn:hover {
-            background: #D32F2F;
+            background: hsl(var(--destructive) / 0.9);
             transform: scale(1.05);
         }
 
@@ -558,8 +655,8 @@ const HTML_CONTENT = `
         }
 
         .key-cell {
-            font-size: 18px;
-            color: var(--color-text-secondary);
+            font-size: 14px;
+            color: hsl(var(--muted-foreground));
             max-width: 200px;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -568,74 +665,238 @@ const HTML_CONTENT = `
 
         .refresh-btn {
             position: fixed;
-            bottom: var(--spacing-xl);
-            right: var(--spacing-xl);
-            background: var(--color-primary);
-            color: white;
+            bottom: 2rem;
+            right: 2rem;
+            background: hsl(var(--primary));
+            color: hsl(var(--primary-foreground));
             border: none;
-            border-radius: 100px;
-            padding: 16px 28px;
-            font-size: 15px;
+            border-radius: calc(var(--radius) * 10);
+            padding: 0.75rem 1.5rem;
+            font-size: 0.875rem;
             font-weight: 600;
             cursor: pointer;
-            box-shadow: 0 8px 24px rgba(0, 122, 255, 0.35);
-            transition: var(--transition);
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            transition: all 0.15s;
             display: flex;
             align-items: center;
-            gap: var(--spacing-xs);
+            gap: 0.5rem;
             z-index: 100;
         }
 
         .refresh-btn:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 12px 32px rgba(0, 122, 255, 0.45);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            background: hsl(var(--primary) / 0.9);
         }
 
         .refresh-btn:active {
-            transform: translateY(-1px);
+            transform: translateY(0);
         }
 
-        .clear-zero-btn {
+        .export-zero-btn {
             position: fixed;
-            bottom: calc(var(--spacing-xl) + 70px);
-            right: var(--spacing-xl);
-            background: var(--color-danger);
-            color: white;
+            bottom: calc(2rem + 4rem);
+            right: 2rem;
+            background: hsl(var(--warning));
+            color: hsl(var(--warning-foreground));
             border: none;
-            border-radius: 100px;
-            padding: 16px 28px;
-            font-size: 15px;
+            border-radius: calc(var(--radius) * 10);
+            padding: 0.75rem 1.5rem;
+            font-size: 0.875rem;
             font-weight: 600;
             cursor: pointer;
-            box-shadow: 0 8px 24px rgba(255, 59, 48, 0.35);
-            transition: var(--transition);
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            transition: all 0.15s;
             display: flex;
             align-items: center;
-            gap: var(--spacing-xs);
+            gap: 0.5rem;
             z-index: 100;
         }
 
-        .clear-zero-btn:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 12px 32px rgba(255, 59, 48, 0.45);
+        .export-zero-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            background: hsl(var(--warning) / 0.9);
         }
 
-        .clear-zero-btn:active {
-            transform: translateY(-1px);
+        .export-zero-btn:active {
+            transform: translateY(0);
+        }
+
+        .export-valid-btn {
+            position: fixed;
+            bottom: calc(2rem + 8rem);
+            right: 2rem;
+            background: hsl(var(--success));
+            color: hsl(var(--success-foreground));
+            border: none;
+            border-radius: calc(var(--radius) * 10);
+            padding: 0.75rem 1.5rem;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            transition: all 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            z-index: 100;
+        }
+
+        .export-valid-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            background: hsl(var(--success) / 0.9);
+        }
+
+        .export-valid-btn:active {
+            transform: translateY(0);
+        }
+
+        /* 导出零额度弹窗 */
+        .export-zero-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgb(0 0 0 / 0.5);
+            backdrop-filter: blur(10px);
+            z-index: 1001;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .export-zero-content {
+            background: hsl(var(--card));
+            border: 1px solid hsl(var(--border));
+            border-radius: calc(var(--radius) * 2);
+            max-width: 700px;
+            width: 100%;
+            max-height: 85vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+            animation: slideUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+        }
+
+        .export-zero-header {
+            background: hsl(var(--warning));
+            color: hsl(var(--warning-foreground));
+            padding: 1.5rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid hsl(var(--border));
+        }
+
+        .export-zero-header h2 {
+            margin: 0;
+            font-size: 1.25rem;
+            font-weight: 600;
+            letter-spacing: -0.025em;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .export-zero-body {
+            padding: 24px 32px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .export-zero-textarea {
+            width: 100%;
+            padding: 12px;
+            background: hsl(var(--muted) / 0.3);
+            border: 1px solid hsl(var(--border));
+            border-radius: var(--radius);
+            font-size: 13px;
+            font-family: 'Fira Code', 'Monaco', 'Courier New', monospace;
+            resize: vertical;
+            min-height: 300px;
+            color: hsl(var(--foreground));
+            line-height: 1.8;
+        }
+
+        .export-zero-textarea:focus {
+            outline: none;
+            border-color: hsl(var(--ring));
+            box-shadow: 0 0 0 3px hsl(var(--ring) / 0.1);
+        }
+
+        .export-zero-actions {
+            padding: 16px 32px 24px;
+            display: flex;
+            gap: 12px;
+            border-top: 1px solid hsl(var(--border));
+        }
+
+        .export-action-btn {
+            flex: 1;
+            padding: 10px 20px;
+            border: none;
+            border-radius: var(--radius);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .export-action-btn.copy {
+            background: hsl(var(--primary));
+            color: hsl(var(--primary-foreground));
+        }
+
+        .export-action-btn.copy:hover {
+            background: hsl(var(--primary) / 0.9);
+        }
+
+        .export-action-btn.clear {
+            background: hsl(var(--destructive));
+            color: hsl(var(--destructive-foreground));
+        }
+
+        .export-action-btn.clear:hover {
+            background: hsl(var(--destructive) / 0.9);
+        }
+
+        .export-action-btn:active {
+            transform: scale(0.98);
+        }
+
+        .export-zero-info {
+            color: hsl(var(--muted-foreground));
+            font-size: 14px;
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            background: hsl(var(--muted) / 0.5);
+            border-radius: var(--radius);
+            border: 1px solid hsl(var(--border));
         }
 
         .loading {
             text-align: center;
             padding: 60px 20px;
-            color: var(--color-text-secondary);
-            font-size: 15px;
+            color: hsl(var(--muted-foreground));
+            font-size: 14px;
         }
 
         .error {
             text-align: center;
             padding: 60px 20px;
-            color: var(--color-danger);
-            font-size: 15px;
+            color: hsl(var(--destructive));
+            font-size: 14px;
         }
 
         @keyframes spin {
@@ -645,33 +906,36 @@ const HTML_CONTENT = `
 
         .spinner {
             display: inline-block;
-            width: 18px;
-            height: 18px;
-            border: 2.5px solid rgba(255, 255, 255, 0.25);
+            width: 16px;
+            height: 16px;
+            border: 2px solid currentColor;
             border-radius: 50%;
-            border-top-color: white;
+            border-top-color: transparent;
             animation: spin 0.8s linear infinite;
         }
 
         .manage-btn {
             position: absolute;
-            top: var(--spacing-lg);
-            right: var(--spacing-lg);
-            background: rgba(255, 255, 255, 0.15);
+            top: 1.5rem;
+            right: 1.5rem;
+            background: hsl(var(--primary-foreground) / 0.1);
             backdrop-filter: blur(10px);
-            color: white;
-            border: 1px solid rgba(255, 255, 255, 0.25);
-            border-radius: 100px;
-            padding: 10px 20px;
-            font-size: 14px;
-            font-weight: 600;
+            color: hsl(var(--primary-foreground));
+            border: 1px solid hsl(var(--primary-foreground) / 0.2);
+            border-radius: var(--radius);
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
             cursor: pointer;
-            transition: var(--transition);
+            transition: all 0.15s;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
         }
 
         .manage-btn:hover {
-            background: rgba(255, 255, 255, 0.25);
-            transform: scale(1.05);
+            background: hsl(var(--primary-foreground) / 0.2);
+            transform: scale(1.02);
         }
 
         .manage-panel {
@@ -680,13 +944,13 @@ const HTML_CONTENT = `
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(0, 0, 0, 0.5);
+            background: rgb(0 0 0 / 0.5);
             backdrop-filter: blur(10px);
             z-index: 1000;
             display: flex;
             align-items: center;
             justify-content: center;
-            padding: var(--spacing-lg);
+            padding: 24px;
             animation: fadeIn 0.3s ease;
         }
 
@@ -696,15 +960,16 @@ const HTML_CONTENT = `
         }
 
         .manage-content {
-            background: var(--color-surface);
-            border-radius: var(--radius-xl);
+            background: hsl(var(--card));
+            border: 1px solid hsl(var(--border));
+            border-radius: calc(var(--radius) * 2);
             max-width: 1000px;
             width: 100%;
             max-height: 85vh;
             overflow: hidden;
             display: flex;
             flex-direction: column;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
             animation: slideUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
             position: relative;
         }
@@ -712,57 +977,58 @@ const HTML_CONTENT = `
         @keyframes slideUp {
             from {
                 opacity: 0;
-                transform: translateY(40px) scale(0.95);
+                transform: translateY(20px);
             }
             to {
                 opacity: 1;
-                transform: translateY(0) scale(1);
+                transform: translateY(0);
             }
         }
 
         .manage-header {
-            background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
-            color: white;
-            padding: var(--spacing-lg) var(--spacing-xl);
+            background: hsl(var(--primary));
+            color: hsl(var(--primary-foreground));
+            padding: 1.5rem 2rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            border-bottom: 1px solid hsl(var(--border));
         }
 
         .manage-header h2 {
             margin: 0;
-            font-size: 24px;
-            font-weight: 700;
-            letter-spacing: -0.3px;
+            font-size: 1.25rem;
+            font-weight: 600;
+            letter-spacing: -0.025em;
         }
 
         .close-btn {
             position: absolute;
-            top: var(--spacing-md);
-            right: var(--spacing-md);
-            background: rgba(255, 255, 255, 0.15);
+            top: 1rem;
+            right: 1rem;
+            background: hsl(var(--primary-foreground) / 0.1);
             backdrop-filter: blur(10px);
-            border: none;
-            color: white;
-            font-size: 22px;
+            border: 1px solid hsl(var(--primary-foreground) / 0.2);
+            color: hsl(var(--primary-foreground));
+            font-size: 1.25rem;
             cursor: pointer;
             border-radius: 50%;
-            width: 36px;
-            height: 36px;
+            width: 2rem;
+            height: 2rem;
             display: flex;
             align-items: center;
             justify-content: center;
-            transition: var(--transition);
+            transition: all 0.15s;
             z-index: 10;
         }
 
         .close-btn:hover {
-            background: rgba(255, 255, 255, 0.25);
+            background: hsl(var(--primary-foreground) / 0.2);
             transform: rotate(90deg);
         }
 
         .manage-body {
-            padding: var(--spacing-xl);
+            padding: 32px;
             overflow-y: auto;
             flex: 1;
         }
@@ -772,50 +1038,55 @@ const HTML_CONTENT = `
         }
 
         .import-section h3 {
-            margin: 0 0 var(--spacing-md) 0;
-            font-size: 22px;
+            margin: 0 0 16px 0;
+            font-size: 18px;
             font-weight: 600;
-            color: var(--color-text-primary);
-            letter-spacing: -0.3px;
+            color: hsl(var(--foreground));
+            letter-spacing: -0.025em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
 
         #importKeys {
             width: 100%;
-            padding: var(--spacing-md);
-            border: 1.5px solid var(--color-border);
-            border-radius: var(--radius-md);
-            font-size: 15px;
+            padding: 12px;
+            background: hsl(var(--background));
+            border: 1px solid hsl(var(--input));
+            border-radius: var(--radius);
+            font-size: 14px;
             resize: vertical;
-            transition: var(--transition);
-            line-height: 1.8;
+            transition: all 0.2s;
+            line-height: 1.6;
             min-height: 150px;
+            color: hsl(var(--foreground));
         }
 
         #importKeys:focus {
             outline: none;
-            border-color: var(--color-primary);
-            box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.1);
+            border-color: hsl(var(--ring));
+            box-shadow: 0 0 0 3px hsl(var(--ring) / 0.1);
         }
 
         .import-btn {
-            margin-top: var(--spacing-md);
-            background: var(--color-primary);
-            color: white;
+            margin-top: 1rem;
+            background: hsl(var(--primary));
+            color: hsl(var(--primary-foreground));
             border: none;
-            border-radius: var(--radius-md);
-            padding: 12px 24px;
-            font-size: 15px;
-            font-weight: 600;
+            border-radius: var(--radius);
+            padding: 0.625rem 1.25rem;
+            font-size: 0.875rem;
+            font-weight: 500;
             cursor: pointer;
-            transition: var(--transition);
+            transition: all 0.15s;
             display: inline-flex;
             align-items: center;
-            gap: var(--spacing-xs);
+            gap: 0.5rem;
         }
 
         .import-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(0, 122, 255, 0.3);
+            background: hsl(var(--primary) / 0.9);
+            transform: translateY(-1px);
         }
 
         .import-btn:active {
@@ -823,23 +1094,26 @@ const HTML_CONTENT = `
         }
 
         .import-result {
-            margin-top: var(--spacing-md);
-            padding: var(--spacing-md);
-            border-radius: var(--radius-sm);
+            margin-top: 16px;
+            padding: 12px 16px;
+            border-radius: var(--radius);
             font-size: 14px;
             font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .import-result.success {
-            background: rgba(52, 199, 89, 0.1);
-            color: var(--color-success);
-            border: 1px solid rgba(52, 199, 89, 0.2);
+            background: hsl(var(--success) / 0.1);
+            color: hsl(var(--success));
+            border: 1px solid hsl(var(--success) / 0.2);
         }
 
         .import-result.error {
-            background: rgba(255, 59, 48, 0.1);
-            color: var(--color-danger);
-            border: 1px solid rgba(255, 59, 48, 0.2);
+            background: hsl(var(--destructive) / 0.1);
+            color: hsl(var(--destructive));
+            border: 1px solid hsl(var(--destructive) / 0.2);
         }
 
         .keys-list {
@@ -856,12 +1130,12 @@ const HTML_CONTENT = `
         }
 
         .keys-list::-webkit-scrollbar-thumb {
-            background: var(--color-border);
+            background: hsl(var(--border));
             border-radius: 100px;
         }
 
         .keys-list::-webkit-scrollbar-thumb:hover {
-            background: var(--color-text-secondary);
+            background: hsl(var(--muted-foreground));
         }
 
         /* 分页样式 */
@@ -869,29 +1143,30 @@ const HTML_CONTENT = `
             display: flex;
             justify-content: center;
             align-items: center;
-            gap: var(--spacing-sm);
-            margin-top: var(--spacing-lg);
-            padding: var(--spacing-lg) 0;
+            gap: 12px;
+            margin-top: 24px;
+            padding: 24px 0;
+            flex-wrap: wrap;
         }
 
         .pagination-btn {
-            background: var(--color-surface);
-            color: var(--color-text-primary);
-            border: 1.5px solid var(--color-border);
-            border-radius: var(--radius-sm);
+            background: hsl(var(--card));
+            color: hsl(var(--foreground));
+            border: 1px solid hsl(var(--border));
+            border-radius: var(--radius);
             padding: 10px 16px;
-            font-size: 15px;
+            font-size: 14px;
             font-weight: 600;
             cursor: pointer;
-            transition: var(--transition);
+            transition: all 0.2s;
             min-width: 40px;
         }
 
         .pagination-btn:hover:not(:disabled) {
-            background: var(--color-primary);
-            color: white;
-            border-color: var(--color-primary);
-            transform: translateY(-2px);
+            background: hsl(0 0% 40%);
+            color: hsl(var(--background));
+            border-color: hsl(0 0% 40%);
+            transform: translateY(-1px);
         }
 
         .pagination-btn:disabled {
@@ -900,63 +1175,131 @@ const HTML_CONTENT = `
         }
 
         .pagination-btn.active {
-            background: var(--color-primary);
-            color: white;
-            border-color: var(--color-primary);
+            background: hsl(0 0% 40%);
+            color: hsl(var(--background));
+            border-color: hsl(0 0% 40%);
         }
 
         .pagination-info {
-            font-size: 16px;
-            color: var(--color-text-secondary);
+            font-size: 14px;
+            color: hsl(var(--muted-foreground));
             font-weight: 500;
-            padding: 0 var(--spacing-md);
+            padding: 0 16px;
+        }
+
+        .pagination-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .pagination-select {
+            padding: 8px 12px;
+            background: hsl(var(--background));
+            border: 1px solid hsl(var(--border));
+            border-radius: var(--radius);
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            color: hsl(var(--foreground));
+            transition: all 0.2s;
+        }
+
+        .pagination-select:hover {
+            border-color: hsl(var(--ring));
+        }
+
+        .pagination-select:focus {
+            outline: none;
+            border-color: hsl(var(--ring));
+            box-shadow: 0 0 0 3px hsl(var(--ring) / 0.1);
+        }
+
+        .pagination-jump {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .pagination-jump input {
+            width: 60px;
+            padding: 8px 12px;
+            background: hsl(var(--background));
+            border: 1px solid hsl(var(--border));
+            border-radius: var(--radius);
+            font-size: 14px;
+            text-align: center;
+            color: hsl(var(--foreground));
+            font-family: 'Fira Code', monospace;
+        }
+
+        .pagination-jump input:focus {
+            outline: none;
+            border-color: hsl(var(--ring));
+            box-shadow: 0 0 0 3px hsl(var(--ring) / 0.1);
+        }
+
+        .pagination-jump button {
+            padding: 8px 16px;
+            background: hsl(var(--primary));
+            color: hsl(var(--primary-foreground));
+            border: none;
+            border-radius: var(--radius);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .pagination-jump button:hover {
+            background: hsl(var(--primary) / 0.9);
         }
 
         .key-item {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: calc(var(--spacing-md) * 1.25);
-            background: var(--color-bg);
-            border-radius: var(--radius-md);
-            margin-bottom: var(--spacing-sm);
-            transition: var(--transition);
+            padding: 16px;
+            background: hsl(var(--muted) / 0.5);
+            border-radius: var(--radius);
+            margin-bottom: 12px;
+            transition: all 0.2s;
             border: 1px solid transparent;
         }
 
         .key-item:hover {
-            background: rgba(0, 122, 255, 0.04);
-            border-color: rgba(0, 122, 255, 0.1);
+            background: hsl(var(--muted));
+            border-color: hsl(var(--border));
         }
 
         .key-info { flex: 1; }
 
         .key-id {
             font-weight: 600;
-            color: var(--color-text-primary);
-            font-size: 16px;
+            color: hsl(var(--foreground));
+            font-size: 14px;
             margin-bottom: 6px;
         }
 
         .key-masked {
-            color: var(--color-text-secondary);
-            font-size: 14px;
+            color: hsl(var(--muted-foreground));
+            font-size: 13px;
         }
 
         .delete-btn {
-            background: var(--color-danger);
-            color: white;
+            background: hsl(var(--destructive));
+            color: hsl(var(--destructive-foreground));
             border: none;
-            border-radius: var(--radius-sm);
-            padding: 10px 18px;
-            font-size: 14px;
-            font-weight: 600;
+            border-radius: var(--radius);
+            padding: 8px 16px;
+            font-size: 13px;
+            font-weight: 500;
             cursor: pointer;
-            transition: var(--transition);
+            transition: all 0.2s;
         }
 
         .delete-btn:hover {
-            background: #D32F2F;
+            background: hsl(var(--destructive) / 0.9);
             transform: scale(1.05);
         }
 
@@ -966,30 +1309,30 @@ const HTML_CONTENT = `
 
         /* Responsive Design */
         @media (max-width: 768px) {
-            body { padding: var(--spacing-sm); }
-            .header { padding: var(--spacing-lg); }
-            .header h1 { font-size: 26px; }
+            body { padding: 12px; }
+            .header { padding: 24px; }
+            .header h1 { font-size: 24px; }
             .stats-cards {
                 grid-template-columns: 1fr;
-                padding: var(--spacing-lg);
+                padding: 24px;
             }
             .table-container {
-                padding: 0 var(--spacing-md) var(--spacing-lg);
+                padding: 0 16px 24px;
                 overflow-x: scroll;
             }
             table {
                 transform: scale(1);
-                margin-bottom: var(--spacing-lg);
+                margin-bottom: 24px;
             }
             .manage-btn {
                 position: static;
-                margin-top: var(--spacing-md);
+                margin-top: 16px;
                 width: 100%;
             }
             .refresh-btn {
-                bottom: var(--spacing-md);
-                right: var(--spacing-md);
-                padding: 14px 24px;
+                bottom: 16px;
+                right: 16px;
+                padding: 10px 20px;
             }
         }
     </style>
@@ -997,54 +1340,88 @@ const HTML_CONTENT = `
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚀 Droid API 余额监控看板</h1>
+            <h1>
+                <iconify-icon icon="lucide:rocket"></iconify-icon>
+                Droid API 余额监控看板
+            </h1>
             <div class="update-time" id="updateTime">正在加载...</div>
             <div style="margin-top: 8px; font-size: 14px; opacity: 0.85;">
                 <span id="autoRefreshStatus">自动刷新: 启用中 | 下次刷新: <span id="headerNextRefresh">计算中...</span></span>
             </div>
-            <button class="manage-btn" onclick="toggleManagePanel()">⚙️ 管理密钥</button>
+            <button class="manage-btn" onclick="toggleManagePanel()">
+                <iconify-icon icon="lucide:settings"></iconify-icon>
+                管理密钥
+            </button>
         </div>
 
         <!-- Management Panel -->
         <div class="manage-panel" id="managePanel" style="display: none;">
             <div class="manage-content">
-                <button class="close-btn" onclick="toggleManagePanel()">✕</button>
+                <button class="close-btn" onclick="toggleManagePanel()">
+                    <iconify-icon icon="lucide:x"></iconify-icon>
+                </button>
                 <div class="manage-header">
                     <h2>批量导入密钥</h2>
                 </div>
                 <div class="manage-body">
                     <div class="import-section">
-                        <h3>📦 添加 API Key</h3>
-                        <p style="color: var(--color-text-secondary); font-size: 14px; margin-bottom: var(--spacing-md);">
+                        <h3>
+                            <iconify-icon icon="lucide:package"></iconify-icon>
+                            添加 API Key
+                        </h3>
+                        <p style="color: hsl(var(--muted-foreground)); font-size: 14px; margin-bottom: 16px;">
                             每行粘贴一个 API Key，支持批量导入数百个密钥
                         </p>
                         <textarea id="importKeys" placeholder="每行粘贴一个 API Key&#10;fk-xxxxx&#10;fk-yyyyy&#10;fk-zzzzz" rows="10"></textarea>
                         <button class="import-btn" onclick="importKeys()">
                             <span id="importSpinner" style="display: none;" class="spinner"></span>
-                            <span id="importText">🚀 导入密钥</span>
+                            <iconify-icon icon="lucide:upload" id="importIcon"></iconify-icon>
+                            <span id="importText">导入密钥</span>
                         </button>
                         <div id="importResult" class="import-result"></div>
                     </div>
 
-                    <div class="import-section" style="margin-top: var(--spacing-xl); padding-top: var(--spacing-xl); border-top: 1.5px solid var(--color-border);">
-                        <h3>⏱️ 自动刷新设置</h3>
-                        <p style="color: var(--color-text-secondary); font-size: 14px; margin-bottom: var(--spacing-md);">
+                    <div class="import-section" style="margin-top: 32px; padding-top: 32px; border-top: 1px solid hsl(var(--border));">
+                        <h3>
+                            <iconify-icon icon="lucide:copy"></iconify-icon>
+                            重复密钥检测
+                        </h3>
+                        <p style="color: hsl(var(--muted-foreground)); font-size: 14px; margin-bottom: 16px;">
+                            检测并清理数据库中重复的API密钥(保留最早导入的一个)
+                        </p>
+                        <button class="import-btn" onclick="checkDuplicates()" style="background: hsl(var(--warning)); color: hsl(var(--warning-foreground));">
+                            <span id="checkDupSpinner" style="display: none;" class="spinner"></span>
+                            <iconify-icon icon="lucide:search" id="checkDupIcon"></iconify-icon>
+                            <span id="checkDupText">检测重复密钥</span>
+                        </button>
+                        <div id="duplicateResult" class="import-result" style="display: none;"></div>
+                        <div id="duplicateList" style="margin-top: 16px; display: none;"></div>
+                    </div>
+
+                    <div class="import-section" style="margin-top: 32px; padding-top: 32px; border-top: 1px solid hsl(var(--border));">
+                        <h3>
+                            <iconify-icon icon="lucide:timer"></iconify-icon>
+                            自动刷新设置
+                        </h3>
+                        <p style="color: hsl(var(--muted-foreground)); font-size: 14px; margin-bottom: 16px;">
                             设置自动刷新间隔时间（分钟）
                         </p>
-                        <div style="display: flex; align-items: center; gap: var(--spacing-md); margin-bottom: var(--spacing-md);">
+                        <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px;">
                             <input type="number" id="refreshInterval" min="1" max="1440" value="30"
-                                   style="width: 120px; padding: 12px; border: 1.5px solid var(--color-border); border-radius: var(--radius-md); font-size: 15px; font-family: 'Fira Code', monospace;">
-                            <span style="color: var(--color-text-secondary); font-size: 15px;">分钟</span>
+                                   style="width: 120px; padding: 10px 12px; background: hsl(var(--background)); border: 1px solid hsl(var(--input)); border-radius: var(--radius); font-size: 14px; font-family: 'Fira Code', monospace; color: hsl(var(--foreground));">
+                            <span style="color: hsl(var(--muted-foreground)); font-size: 14px;">分钟</span>
                         </div>
-                        <div style="display: flex; gap: var(--spacing-sm); margin-bottom: var(--spacing-md);">
-                            <button class="import-btn" onclick="saveRefreshSettings()" style="background: var(--color-success);">
-                                💾 保存设置
+                        <div style="display: flex; gap: 12px; margin-bottom: 16px;">
+                            <button class="import-btn" onclick="saveRefreshSettings()" style="background: hsl(var(--success)); color: hsl(var(--success-foreground));">
+                                <iconify-icon icon="lucide:save"></iconify-icon>
+                                保存设置
                             </button>
-                            <button class="import-btn" onclick="toggleAutoRefresh()" id="toggleRefreshBtn" style="background: var(--color-secondary);">
-                                ⏸️ 暂停自动刷新
+                            <button class="import-btn" onclick="toggleAutoRefresh()" id="toggleRefreshBtn" style="background: hsl(var(--warning)); color: hsl(var(--warning-foreground));">
+                                <iconify-icon icon="lucide:pause" id="toggleRefreshIcon"></iconify-icon>
+                                <span id="toggleRefreshText">暂停自动刷新</span>
                             </button>
                         </div>
-                        <div id="refreshStatus" style="color: var(--color-text-secondary); font-size: 14px; font-weight: 500;">
+                        <div id="refreshStatus" style="color: hsl(var(--muted-foreground)); font-size: 14px; font-weight: 500;">
                             下次刷新: <span id="nextRefreshDisplay">计算中...</span>
                         </div>
                     </div>
@@ -1061,14 +1438,89 @@ const HTML_CONTENT = `
         </div>
     </div>
 
-    <button class="clear-zero-btn" onclick="clearZeroBalanceKeys()">
-        <span class="spinner" style="display: none;" id="clearSpinner"></span>
-        <span id="clearBtnText">🗑️ 清除零额度</span>
+    <!-- 导出零额度密钥弹窗 -->
+    <div class="export-zero-modal" id="exportZeroModal" style="display: none;">
+        <div class="export-zero-content">
+            <button class="close-btn" onclick="closeExportZeroModal()">
+                <iconify-icon icon="lucide:x"></iconify-icon>
+            </button>
+            <div class="export-zero-header">
+                <h2>
+                    <iconify-icon icon="lucide:file-down"></iconify-icon>
+                    零额度密钥列表
+                </h2>
+            </div>
+            <div class="export-zero-body">
+                <div class="export-zero-info" id="exportZeroInfo">
+                    正在加载零额度密钥...
+                </div>
+                <textarea
+                    class="export-zero-textarea"
+                    id="exportZeroTextarea"
+                    readonly
+                    placeholder="暂无零额度密钥">
+                </textarea>
+            </div>
+            <div class="export-zero-actions">
+                <button class="export-action-btn copy" onclick="copyZeroKeys()">
+                    <iconify-icon icon="lucide:copy"></iconify-icon>
+                    <span id="copyBtnText">复制全部</span>
+                </button>
+                <button class="export-action-btn clear" onclick="clearZeroBalanceKeysFromModal()">
+                    <span class="spinner" style="display: none;" id="modalClearSpinner"></span>
+                    <iconify-icon icon="lucide:trash-2" id="modalClearIcon"></iconify-icon>
+                    <span id="modalClearBtnText">清除这些密钥</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 导出有效密钥弹窗 -->
+    <div class="export-zero-modal" id="exportValidModal" style="display: none;">
+        <div class="export-zero-content">
+            <button class="close-btn" onclick="closeExportValidModal()">
+                <iconify-icon icon="lucide:x"></iconify-icon>
+            </button>
+            <div class="export-zero-header" style="background: hsl(var(--success));">
+                <h2>
+                    <iconify-icon icon="lucide:check-circle"></iconify-icon>
+                    有效密钥列表
+                </h2>
+            </div>
+            <div class="export-zero-body">
+                <div class="export-zero-info" id="exportValidInfo">
+                    正在加载有效密钥...
+                </div>
+                <textarea
+                    class="export-zero-textarea"
+                    id="exportValidTextarea"
+                    readonly
+                    placeholder="暂无有效密钥">
+                </textarea>
+            </div>
+            <div class="export-zero-actions">
+                <button class="export-action-btn copy" onclick="copyValidKeys()">
+                    <iconify-icon icon="lucide:copy"></iconify-icon>
+                    <span id="copyValidBtnText">复制全部</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <button class="export-valid-btn" onclick="openExportValidModal()">
+        <iconify-icon icon="lucide:check-circle"></iconify-icon>
+        <span>导出有效密钥</span>
+    </button>
+
+    <button class="export-zero-btn" onclick="openExportZeroModal()">
+        <iconify-icon icon="lucide:file-down"></iconify-icon>
+        <span>导出零额度</span>
     </button>
 
     <button class="refresh-btn" onclick="loadData()">
         <span class="spinner" style="display: none;" id="spinner"></span>
-        <span id="btnText">🔄 刷新数据</span>
+        <iconify-icon icon="lucide:refresh-cw" id="refreshIcon"></iconify-icon>
+        <span id="btnText">刷新数据</span>
     </button>
 
     <script>
@@ -1099,9 +1551,11 @@ const HTML_CONTENT = `
 
         function loadData() {
             const spinner = document.getElementById('spinner');
+            const icon = document.getElementById('refreshIcon');
             const btnText = document.getElementById('btnText');
 
             spinner.style.display = 'inline-block';
+            icon.style.display = 'none';
             btnText.textContent = '加载中...';
 
             fetch('/api/data?t=' + new Date().getTime())
@@ -1120,12 +1574,13 @@ const HTML_CONTENT = `
                     resetAutoRefresh();
                 })
                 .catch(error => {
-                    document.getElementById('tableContent').innerHTML = \`<div class="error">❌ 加载失败: \${error.message}</div>\`;
+                    document.getElementById('tableContent').innerHTML = \`<div class="error"><iconify-icon icon="lucide:alert-circle"></iconify-icon> 加载失败: \${error.message}</div>\`;
                     document.getElementById('updateTime').textContent = "加载失败";
                 })
                 .finally(() => {
                     spinner.style.display = 'none';
-                    btnText.textContent = '🔄 刷新数据';
+                    icon.style.display = 'inline-block';
+                    btnText.textContent = '刷新数据';
                 });
         }
 
@@ -1223,22 +1678,65 @@ const HTML_CONTENT = `
                 </table>\`;
 
             // 添加分页控件
-            if (totalPages > 1) {
+            if (totalPages > 1 || data.data.length > 10) {
                 tableHTML += \`<div class="pagination">\`;
 
+                // 每页条数选择
+                tableHTML += \`
+                    <div class="pagination-controls">
+                        <label style="font-size: 14px; color: hsl(var(--muted-foreground)); font-weight: 500;">每页显示:</label>
+                        <select class="pagination-select" onchange="changeItemsPerPage(this.value)">
+                            <option value="10" \${itemsPerPage === 10 ? 'selected' : ''}>10 条</option>
+                            <option value="20" \${itemsPerPage === 20 ? 'selected' : ''}>20 条</option>
+                            <option value="50" \${itemsPerPage === 50 ? 'selected' : ''}>50 条</option>
+                            <option value="100" \${itemsPerPage === 100 ? 'selected' : ''}>100 条</option>
+                            <option value="\${data.data.length}" \${itemsPerPage === data.data.length ? 'selected' : ''}>全部 (\${data.data.length} 条)</option>
+                        </select>
+                    </div>
+                \`;
+
                 // 上一页按钮
-                tableHTML += \`<button class="pagination-btn" onclick="changePage(\${currentPage - 1})" \${currentPage === 1 ? 'disabled' : ''}>❮ 上一页</button>\`;
+                tableHTML += \`<button class="pagination-btn" onclick="changePage(\${currentPage - 1})" \${currentPage === 1 ? 'disabled' : ''}><iconify-icon icon="lucide:chevron-left"></iconify-icon> 上一页</button>\`;
 
                 // 页码信息
                 tableHTML += \`<span class="pagination-info">第 \${currentPage} / \${totalPages} 页 (共 \${data.data.length} 条)</span>\`;
 
                 // 下一页按钮
-                tableHTML += \`<button class="pagination-btn" onclick="changePage(\${currentPage + 1})" \${currentPage === totalPages ? 'disabled' : ''}>下一页 ❯</button>\`;
+                tableHTML += \`<button class="pagination-btn" onclick="changePage(\${currentPage + 1})" \${currentPage === totalPages ? 'disabled' : ''}>下一页 <iconify-icon icon="lucide:chevron-right"></iconify-icon></button>\`;
+
+                // 跳转页面
+                tableHTML += \`
+                    <div class="pagination-jump">
+                        <label style="font-size: 14px; color: hsl(var(--muted-foreground)); font-weight: 500;">跳转到:</label>
+                        <input type="number" id="jumpPageInput" min="1" max="\${totalPages}" value="\${currentPage}" onkeypress="if(event.key==='Enter')jumpToPage()">
+                        <button onclick="jumpToPage()">GO</button>
+                    </div>
+                \`;
 
                 tableHTML += \`</div>\`;
             }
 
             document.getElementById('tableContent').innerHTML = tableHTML;
+        }
+
+        function changeItemsPerPage(value) {
+            itemsPerPage = parseInt(value);
+            currentPage = 1;
+            renderTable();
+        }
+
+        function jumpToPage() {
+            const input = document.getElementById('jumpPageInput');
+            const page = parseInt(input.value);
+            if (allData) {
+                const totalPages = Math.ceil(allData.data.length / itemsPerPage);
+                if (page >= 1 && page <= totalPages) {
+                    changePage(page);
+                } else {
+                    alert('请输入有效的页码 (1-' + totalPages + ')');
+                    input.value = currentPage;
+                }
+            }
         }
 
         function changePage(page) {
@@ -1267,19 +1765,21 @@ const HTML_CONTENT = `
         async function importKeys() {
             const textarea = document.getElementById('importKeys');
             const spinner = document.getElementById('importSpinner');
+            const icon = document.getElementById('importIcon');
             const text = document.getElementById('importText');
             const result = document.getElementById('importResult');
 
             const keysText = textarea.value.trim();
             if (!keysText) {
                 result.className = 'import-result error';
-                result.textContent = '请输入至少一个 API Key';
+                result.innerHTML = '<iconify-icon icon="lucide:alert-circle"></iconify-icon><span>请输入至少一个 API Key</span>';
                 return;
             }
 
             const keys = keysText.split('\\n').map(k => k.trim()).filter(k => k.length > 0);
 
             spinner.style.display = 'inline-block';
+            icon.style.display = 'none';
             text.textContent = '导入中...';
             result.textContent = '';
             result.className = 'import-result';
@@ -1294,24 +1794,41 @@ const HTML_CONTENT = `
                 const data = await response.json();
 
                 if (response.ok) {
+                    let message = '成功导入 ' + data.success + ' 个密钥';
+                    if (data.duplicates > 0) {
+                        message += ', ' + data.duplicates + ' 个重复已跳过';
+                    }
+                    if (data.failed > 0) {
+                        message += ', ' + data.failed + ' 个失败';
+                    }
+
                     result.className = 'import-result success';
-                    result.textContent = \`成功导入 \${data.success} 个密钥\${data.failed > 0 ? \`, \${data.failed} 个失败\` : ''}\`;
+                    result.innerHTML = \`<iconify-icon icon="lucide:check-circle"></iconify-icon><span>\${message}</span>\`;
+
+                    // 如果有重复的密钥,显示详细信息
+                    if (data.duplicates > 0 && data.duplicateKeys && data.duplicateKeys.length > 0) {
+                        const duplicateList = data.duplicateKeys.slice(0, 5).join(', ');
+                        const moreText = data.duplicateKeys.length > 5 ? ' 等 ' + data.duplicateKeys.length + ' 个' : '';
+                        result.innerHTML += \`<div style="margin-top: 8px; font-size: 12px; opacity: 0.9;">重复密钥: \${duplicateList}\${moreText}</div>\`;
+                    }
+
                     textarea.value = '';
                     // 关闭弹窗并刷新主页面数据
                     setTimeout(() => {
                         toggleManagePanel();
                         loadData();
-                    }, 1500);
+                    }, 2500);
                 } else {
                     result.className = 'import-result error';
-                    result.textContent = '导入失败: ' + data.error;
+                    result.innerHTML = \`<iconify-icon icon="lucide:alert-circle"></iconify-icon><span>导入失败: \${data.error}</span>\`;
                 }
             } catch (error) {
                 result.className = 'import-result error';
-                result.textContent = '导入失败: ' + error.message;
+                result.innerHTML = \`<iconify-icon icon="lucide:alert-circle"></iconify-icon><span>导入失败: \${error.message}</span>\`;
             } finally {
                 spinner.style.display = 'none';
-                text.textContent = '🚀 导入密钥';
+                icon.style.display = 'inline-block';
+                text.textContent = '导入密钥';
             }
         }
 
@@ -1338,8 +1855,390 @@ const HTML_CONTENT = `
             }
         }
 
-        // Clear zero balance keys - 清除零额度或负额度的密钥
-        async function clearZeroBalanceKeys() {
+        // Check for duplicate keys - 检测重复密钥
+        async function checkDuplicates() {
+            const spinner = document.getElementById('checkDupSpinner');
+            const icon = document.getElementById('checkDupIcon');
+            const text = document.getElementById('checkDupText');
+            const result = document.getElementById('duplicateResult');
+            const listDiv = document.getElementById('duplicateList');
+
+            spinner.style.display = 'inline-block';
+            icon.style.display = 'none';
+            text.textContent = '检测中...';
+            result.style.display = 'none';
+            listDiv.style.display = 'none';
+
+            try {
+                const response = await fetch('/api/keys/duplicates');
+                if (!response.ok) {
+                    throw new Error('检测失败');
+                }
+
+                const data = await response.json();
+
+                if (data.duplicates.length === 0) {
+                    result.className = 'import-result success';
+                    result.innerHTML = '<iconify-icon icon="lucide:check-circle"></iconify-icon><span>太好了！没有发现重复密钥</span>';
+                    result.style.display = 'flex';
+                } else {
+                    result.className = 'import-result error';
+                    result.innerHTML = \`<iconify-icon icon="lucide:alert-circle"></iconify-icon><span>发现 \${data.duplicates.length} 组重复密钥(共 \${data.duplicates.reduce((sum, d) => sum + d.count, 0)} 个密钥)</span>\`;
+                    result.style.display = 'flex';
+
+                    // Display duplicate details
+                    let listHTML = '<div style="max-height: 300px; overflow-y: auto; background: hsl(var(--muted) / 0.3); border: 1px solid hsl(var(--border)); border-radius: var(--radius); padding: 16px;">';
+                    listHTML += '<div style="font-weight: 600; margin-bottom: 12px; color: hsl(var(--foreground));">重复密钥详情:</div>';
+
+                    data.duplicates.forEach((dup, index) => {
+                        listHTML += \`
+                            <div style="padding: 12px; background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: var(--radius); margin-bottom: 8px;">
+                                <div style="font-size: 13px; color: hsl(var(--muted-foreground)); margin-bottom: 6px;">
+                                    <strong>密钥:</strong> <code style="font-family: 'Fira Code', monospace; background: hsl(var(--muted) / 0.5); padding: 2px 6px; border-radius: 3px;">\${dup.key}</code>
+                                </div>
+                                <div style="font-size: 13px; color: hsl(var(--muted-foreground));">
+                                    <strong>重复次数:</strong> \${dup.count} 次 | <strong>ID:</strong> \${dup.ids.join(', ')}
+                                </div>
+                            </div>
+                        \`;
+                    });
+
+                    listHTML += '</div>';
+                    listHTML += \`
+                        <button class="import-btn" onclick="cleanDuplicates()" style="margin-top: 16px; background: hsl(var(--destructive)); color: hsl(var(--destructive-foreground));">
+                            <span id="cleanDupSpinner" style="display: none;" class="spinner"></span>
+                            <iconify-icon icon="lucide:trash-2" id="cleanDupIcon"></iconify-icon>
+                            <span id="cleanDupText">清除重复密钥(保留最早的)</span>
+                        </button>
+                    \`;
+
+                    listDiv.innerHTML = listHTML;
+                    listDiv.style.display = 'block';
+                }
+            } catch (error) {
+                result.className = 'import-result error';
+                result.innerHTML = \`<iconify-icon icon="lucide:alert-circle"></iconify-icon><span>检测失败: \${error.message}</span>\`;
+                result.style.display = 'flex';
+            } finally {
+                spinner.style.display = 'none';
+                icon.style.display = 'inline-block';
+                text.textContent = '检测重复密钥';
+            }
+        }
+
+        // Clean duplicate keys - 清除重复密钥
+        async function cleanDuplicates() {
+            if (!confirm('确定要清除所有重复密钥吗？每组重复密钥将保留最早导入的一个,删除其余的。此操作不可恢复！')) {
+                return;
+            }
+
+            const spinner = document.getElementById('cleanDupSpinner');
+            const icon = document.getElementById('cleanDupIcon');
+            const text = document.getElementById('cleanDupText');
+
+            spinner.style.display = 'inline-block';
+            icon.style.display = 'none';
+            text.textContent = '清除中...';
+
+            try {
+                const response = await fetch('/api/keys/duplicates/clean', {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    throw new Error('清除失败');
+                }
+
+                const data = await response.json();
+                alert(\`清除完成！已删除 \${data.deletedCount} 个重复密钥\`);
+
+                // 重新检测
+                checkDuplicates();
+
+                // 刷新主页面数据
+                loadData();
+            } catch (error) {
+                alert('清除失败: ' + error.message);
+            } finally {
+                spinner.style.display = 'none';
+                icon.style.display = 'inline-block';
+                text.textContent = '清除重复密钥(保留最早的)';
+            }
+        }
+
+        // 获取零额度密钥的完整key列表
+        async function getZeroBalanceKeysFullList() {
+            if (!allData) {
+                return [];
+            }
+
+            // 找出剩余额度小于等于0的密钥ID
+            const zeroBalanceIds = allData.data
+                .filter(item => {
+                    if (item.error) return false;
+                    const remaining = item.totalAllowance - item.orgTotalTokensUsed;
+                    return remaining <= 0;
+                })
+                .map(item => item.id);
+
+            if (zeroBalanceIds.length === 0) {
+                return [];
+            }
+
+            // 从服务器获取完整的key列表
+            try {
+                const response = await fetch('/api/keys');
+                if (!response.ok) {
+                    throw new Error('无法获取密钥列表');
+                }
+
+                const allKeys = await response.json();
+
+                // 筛选出零额度的完整key
+                const zeroKeys = [];
+                for (const id of zeroBalanceIds) {
+                    const fullKeyEntry = allKeys.find(k => k.id === id);
+                    if (fullKeyEntry) {
+                        // 获取完整key需要从数据库读取
+                        const keyResponse = await fetch(\`/api/keys/\${id}/full\`);
+                        if (keyResponse.ok) {
+                            const keyData = await keyResponse.json();
+                            zeroKeys.push(keyData.key);
+                        }
+                    }
+                }
+
+                return zeroKeys;
+            } catch (error) {
+                console.error('获取零额度密钥失败:', error);
+                return [];
+            }
+        }
+
+        // 打开导出零额度弹窗
+        async function openExportZeroModal() {
+            if (!allData) {
+                alert('请先加载数据');
+                return;
+            }
+
+            const modal = document.getElementById('exportZeroModal');
+            const textarea = document.getElementById('exportZeroTextarea');
+            const info = document.getElementById('exportZeroInfo');
+
+            // 显示弹窗
+            modal.style.display = 'flex';
+
+            // 设置加载状态
+            info.innerHTML = '<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在加载零额度密钥...';
+            textarea.value = '';
+
+            // 获取零额度的密钥
+            try {
+                const zeroKeys = await getZeroBalanceFullKeys();
+
+                if (zeroKeys.length === 0) {
+                    info.innerHTML = '<iconify-icon icon="lucide:check-circle" style="color: hsl(var(--success));"></iconify-icon> 太棒了！没有零额度密钥';
+                    textarea.value = '';
+                    textarea.placeholder = '暂无零额度密钥';
+                } else {
+                    info.innerHTML = \`<iconify-icon icon="lucide:info" style="color: hsl(var(--warning));"></iconify-icon> 找到 <strong>\${zeroKeys.length}</strong> 个零额度密钥(剩余额度 ≤ 0)\`;
+                    textarea.value = zeroKeys.join('\\n');
+                    textarea.placeholder = '';
+                }
+            } catch (error) {
+                info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--destructive));"></iconify-icon> 加载失败: ' + error.message;
+                textarea.value = '';
+            }
+        }
+
+        // 获取零额度的完整密钥
+        async function getZeroBalanceFullKeys() {
+            if (!allData) {
+                return [];
+            }
+
+            // 找出剩余额度小于等于0的密钥
+            const zeroBalanceItems = allData.data.filter(item => {
+                if (item.error) return false;
+                const remaining = item.totalAllowance - item.orgTotalTokensUsed;
+                return remaining <= 0;
+            });
+
+            if (zeroBalanceItems.length === 0) {
+                return [];
+            }
+
+            // 从服务器获取完整的key
+            const fullKeys = [];
+            for (const item of zeroBalanceItems) {
+                try {
+                    const response = await fetch(\`/api/keys/\${item.id}/full\`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        fullKeys.push(data.key);
+                    }
+                } catch (error) {
+                    console.error(\`获取密钥 \${item.id} 失败:\`, error);
+                }
+            }
+
+            return fullKeys;
+        }
+
+        // 获取有效密钥（剩余额度>0）
+        async function getValidBalanceFullKeys() {
+            if (!allData) {
+                return [];
+            }
+
+            // 找出剩余额度大于0的密钥
+            const validBalanceItems = allData.data.filter(item => {
+                if (item.error) return false;
+                const remaining = item.totalAllowance - item.orgTotalTokensUsed;
+                return remaining > 0;
+            });
+
+            if (validBalanceItems.length === 0) {
+                return [];
+            }
+
+            // 从服务器获取完整的key
+            const fullKeys = [];
+            for (const item of validBalanceItems) {
+                try {
+                    const response = await fetch(\`/api/keys/\${item.id}/full\`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        fullKeys.push(data.key);
+                    }
+                } catch (error) {
+                    console.error(\`获取密钥 \${item.id} 失败:\`, error);
+                }
+            }
+
+            return fullKeys;
+        }
+
+        // 打开导出有效密钥弹窗
+        async function openExportValidModal() {
+            if (!allData) {
+                alert('请先加载数据');
+                return;
+            }
+
+            const modal = document.getElementById('exportValidModal');
+            const textarea = document.getElementById('exportValidTextarea');
+            const info = document.getElementById('exportValidInfo');
+
+            // 显示弹窗
+            modal.style.display = 'flex';
+
+            // 设置加载状态
+            info.innerHTML = '<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在加载有效密钥...';
+            textarea.value = '';
+
+            // 获取有效的密钥
+            try {
+                const validKeys = await getValidBalanceFullKeys();
+
+                if (validKeys.length === 0) {
+                    info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--warning));\"></iconify-icon> 没有找到有效密钥（剩余额度 > 0）';
+                    textarea.value = '';
+                    textarea.placeholder = '暂无有效密钥';
+                } else {
+                    info.innerHTML = \`<iconify-icon icon="lucide:check-circle" style="color: hsl(var(--success));\"></iconify-icon> 找到 <strong>\${validKeys.length}</strong> 个有效密钥(剩余额度 > 0)\`;
+                    textarea.value = validKeys.join('\\n');
+                    textarea.placeholder = '';
+                }
+            } catch (error) {
+                info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--destructive));\"></iconify-icon> 加载失败: ' + error.message;
+                textarea.value = '';
+            }
+        }
+
+        // 关闭导出零额度弹窗
+        function closeExportZeroModal() {
+            const modal = document.getElementById('exportZeroModal');
+            modal.style.display = 'none';
+        }
+
+        // 关闭导出有效密钥弹窗
+        function closeExportValidModal() {
+            const modal = document.getElementById('exportValidModal');
+            modal.style.display = 'none';
+        }
+
+        // 复制零额度密钥
+        async function copyZeroKeys() {
+            const textarea = document.getElementById('exportZeroTextarea');
+            const copyBtn = document.getElementById('copyBtnText');
+
+            if (!textarea.value) {
+                alert('没有可复制的内容');
+                return;
+            }
+
+            try {
+                await navigator.clipboard.writeText(textarea.value);
+
+                // 更新按钮文字
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = '已复制!';
+
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                }, 2000);
+            } catch (error) {
+                // 降级方案：使用传统的复制方法
+                textarea.select();
+                document.execCommand('copy');
+
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = '已复制!';
+
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                }, 2000);
+            }
+        }
+
+        // 复制有效密钥
+        async function copyValidKeys() {
+            const textarea = document.getElementById('exportValidTextarea');
+            const copyBtn = document.getElementById('copyValidBtnText');
+
+            if (!textarea.value) {
+                alert('没有可复制的内容');
+                return;
+            }
+
+            try {
+                await navigator.clipboard.writeText(textarea.value);
+
+                // 更新按钮文字
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = '已复制!';
+
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                }, 2000);
+            } catch (error) {
+                // 降级方案：使用传统的复制方法
+                textarea.select();
+                document.execCommand('copy');
+
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = '已复制!';
+
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                }, 2000);
+            }
+        }
+
+        // 从弹窗中清除零额度密钥
+        async function clearZeroBalanceKeysFromModal() {
             if (!allData) {
                 alert('请先加载数据');
                 return;
@@ -1361,10 +2260,12 @@ const HTML_CONTENT = `
                 return;
             }
 
-            const clearSpinner = document.getElementById('clearSpinner');
-            const clearBtnText = document.getElementById('clearBtnText');
+            const clearSpinner = document.getElementById('modalClearSpinner');
+            const clearIcon = document.getElementById('modalClearIcon');
+            const clearBtnText = document.getElementById('modalClearBtnText');
 
             clearSpinner.style.display = 'inline-block';
+            clearIcon.style.display = 'none';
             clearBtnText.textContent = '清除中...';
 
             let successCount = 0;
@@ -1389,9 +2290,13 @@ const HTML_CONTENT = `
             }
 
             clearSpinner.style.display = 'none';
-            clearBtnText.textContent = '🗑️ 清除零额度';
+            clearIcon.style.display = 'inline-block';
+            clearBtnText.textContent = '清除这些密钥';
 
             alert(\`清除完成！\\n成功删除: \${successCount} 个\\n失败: \${failCount} 个\`);
+
+            // 关闭弹窗
+            closeExportZeroModal();
 
             // 重新加载数据
             loadData();
@@ -1490,12 +2395,18 @@ const HTML_CONTENT = `
 
         function updateToggleButton(isRunning) {
             const btn = document.getElementById('toggleRefreshBtn');
+            const icon = document.getElementById('toggleRefreshIcon');
+            const text = document.getElementById('toggleRefreshText');
             if (isRunning) {
-                btn.innerHTML = '⏸️ 暂停自动刷新';
-                btn.style.background = 'var(--color-warning)';
+                icon.setAttribute('icon', 'lucide:pause');
+                text.textContent = '暂停自动刷新';
+                btn.style.background = 'hsl(38 92% 50%)'; // warning color
+                btn.style.color = 'hsl(0 0% 100%)'; // warning-foreground
             } else {
-                btn.innerHTML = '▶️ 启动自动刷新';
-                btn.style.background = 'var(--color-success)';
+                icon.setAttribute('icon', 'lucide:play');
+                text.textContent = '启动自动刷新';
+                btn.style.background = 'hsl(142 71% 45%)'; // success color
+                btn.style.color = 'hsl(0 0% 100%)'; // success-foreground
             }
         }
 
@@ -1766,6 +2677,76 @@ async function handler(req: Request): Promise<Response> {
     }
   }
 
+  // Find duplicate keys in existing database
+  if (url.pathname === "/api/keys/duplicates" && req.method === "GET") {
+    try {
+      const result = await findDuplicateKeys();
+      return new Response(JSON.stringify(result), { headers });
+    } catch (error) {
+      return new Response(JSON.stringify({ error: error.message }), {
+        status: 500,
+        headers,
+      });
+    }
+  }
+
+  // Batch delete duplicate keys (keep only one)
+  if (url.pathname === "/api/keys/duplicates/clean" && req.method === "POST") {
+    try {
+      const result = await findDuplicateKeys();
+      let deletedCount = 0;
+
+      for (const duplicate of result.duplicates) {
+        // Keep the first one, delete the rest
+        for (let i = 1; i < duplicate.ids.length; i++) {
+          await deleteApiKey(duplicate.ids[i]);
+          deletedCount++;
+        }
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        deletedCount,
+        message: `Successfully deleted ${deletedCount} duplicate keys`
+      }), { headers });
+    } catch (error) {
+      return new Response(JSON.stringify({ error: error.message }), {
+        status: 500,
+        headers,
+      });
+    }
+  }
+
+  // Get full key (for export functionality)
+  if (url.pathname.match(/^\/api\/keys\/[^/]+\/full$/) && req.method === "GET") {
+    try {
+      const pathParts = url.pathname.split("/");
+      const id = pathParts[pathParts.length - 2];
+
+      if (!id) {
+        return new Response(JSON.stringify({ error: "Key ID required" }), {
+          status: 400,
+          headers,
+        });
+      }
+
+      const keyEntry = await getApiKey(id);
+      if (!keyEntry) {
+        return new Response(JSON.stringify({ error: "Key not found" }), {
+          status: 404,
+          headers,
+        });
+      }
+
+      return new Response(JSON.stringify({ key: keyEntry.key }), { headers });
+    } catch (error) {
+      return new Response(JSON.stringify({ error: error.message }), {
+        status: 500,
+        headers,
+      });
+    }
+  }
+
   // Delete a key
   if (url.pathname.startsWith("/api/keys/") && req.method === "DELETE") {
     try {
@@ -1814,6 +2795,6 @@ async function handler(req: Request): Promise<Response> {
   return new Response("Not Found", { status: 404 });
 }
 
-console.log("🚀 Server running on http://localhost:8000");
+console.log(`🚀 Server running on http://localhost:${PORT}`);
 console.log(`🔐 Password Protection: ${ADMIN_PASSWORD ? 'ENABLED ✅' : 'DISABLED ⚠️'}`);
-serve(handler);
+serve(handler, { port: PORT });
