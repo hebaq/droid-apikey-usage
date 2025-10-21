@@ -62,6 +62,7 @@ interface ApiKeyEntry {
   id: string;
   key: string;
   name?: string;
+  note?: string;  // 新增备注字段
   createdAt: number;
 }
 
@@ -661,6 +662,37 @@ const HTML_CONTENT = `
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+        }
+
+        .note-cell {
+            font-size: 14px;
+            color: hsl(var(--foreground));
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            cursor: pointer;
+            padding: 12px 16px !important;
+            transition: background-color 0.15s;
+        }
+
+        .note-cell:hover {
+            background-color: hsl(var(--muted) / 0.5);
+        }
+
+        .note-cell input {
+            width: 100%;
+            padding: 6px 8px;
+            background: hsl(var(--background));
+            border: 1px solid hsl(var(--ring));
+            border-radius: calc(var(--radius) * 0.75);
+            font-size: 14px;
+            color: hsl(var(--foreground));
+            box-shadow: 0 0 0 3px hsl(var(--ring) / 0.1);
+        }
+
+        .note-cell input:focus {
+            outline: none;
         }
 
         .refresh-btn {
@@ -1598,6 +1630,7 @@ const HTML_CONTENT = `
                         data: keys.map(k => ({
                             id: k.id,
                             key: k.masked,
+                            note: k.note,
                             loading: true,
                             totalAllowance: 0,
                             orgTotalTokensUsed: 0,
@@ -1653,6 +1686,7 @@ const HTML_CONTENT = `
                             return {
                                 id: keyEntry.id,
                                 key: keyEntry.masked,
+                                note: keyEntry.note,
                                 error: 'HTTP ' + usageResponse.status
                             };
                         }
@@ -1665,6 +1699,7 @@ const HTML_CONTENT = `
                             return {
                                 id: keyEntry.id,
                                 key: keyEntry.masked,
+                                note: keyEntry.note,
                                 error: 'Invalid response'
                             };
                         }
@@ -1686,6 +1721,7 @@ const HTML_CONTENT = `
                         return {
                             id: keyEntry.id,
                             key: keyEntry.masked,
+                            note: keyEntry.note,
                             startDate: formatDate(usageInfo.startDate),
                             endDate: formatDate(usageInfo.endDate),
                             orgTotalTokensUsed: standardUsage.orgTotalTokensUsed,
@@ -1702,6 +1738,7 @@ const HTML_CONTENT = `
                         return {
                             id: keyEntry.id,
                             key: keyEntry.masked,
+                            note: keyEntry.note,
                             error: error.message || 'Failed to fetch'
                         };
                     }
@@ -1802,6 +1839,7 @@ const HTML_CONTENT = `
                         <tr>
                             <th>ID</th>
                             <th>API Key</th>
+                            <th>备注</th>
                             <th>开始时间</th>
                             <th>结束时间</th>
                             <th class="number">总计额度</th>
@@ -1816,7 +1854,7 @@ const HTML_CONTENT = `
             // 总计行放在第一行
             tableHTML += \`
                 <tr class="total-row">
-                    <td colspan="4">总计 (SUM)</td>
+                    <td colspan="5">总计 (SUM)</td>
                     <td class="number">\${formatNumber(totalAllowance)}</td>
                     <td class="number">\${formatNumber(totalUsed)}</td>
                     <td class="number">\${formatNumber(totalRemaining)}</td>
@@ -1832,6 +1870,7 @@ const HTML_CONTENT = `
                         <tr style="opacity: 0.6;">
                             <td>\${item.id}</td>
                             <td class="key-cell" title="\${item.key}">\${item.key}</td>
+                            <td class="note-cell" data-id="\${item.id}" ondblclick="editNote('\${item.id}', '\${item.note || ''}')" title="双击编辑备注">\${item.note || '<span style="color: hsl(var(--muted-foreground)); opacity: 0.5;">双击添加备注</span>'}</td>
                             <td colspan="6" style="text-align: center; color: hsl(var(--muted-foreground));"><span class="spinner" style="display: inline-block; margin-right: 8px;"></span>加载额度数据中...</td>
                             <td style="text-align: center;">
                                 <button class="table-delete-btn" onclick="deleteKeyFromTable('\${item.id}')" style="background: hsl(var(--destructive));" title="删除密钥">
@@ -1844,6 +1883,7 @@ const HTML_CONTENT = `
                         <tr>
                             <td>\${item.id}</td>
                             <td class="key-cell" title="\${item.key}">\${item.key}</td>
+                            <td class="note-cell" data-id="\${item.id}" ondblclick="editNote('\${item.id}', '\${item.note || ''}')" title="双击编辑备注">\${item.note || '<span style="color: hsl(var(--muted-foreground)); opacity: 0.5;">双击添加备注</span>'}</td>
                             <td colspan="6" class="error-row">
                                 加载失败: \${item.error}
                             </td>
@@ -1864,6 +1904,7 @@ const HTML_CONTENT = `
                         <tr>
                             <td>\${item.id}</td>
                             <td class="key-cell" title="\${item.key}">\${item.key}</td>
+                            <td class="note-cell" data-id="\${item.id}" ondblclick="editNote('\${item.id}', '\${(item.note || '').replace(/'/g, '\\\\&#39;')}')" title="双击编辑备注">\${item.note || '<span style="color: hsl(var(--muted-foreground)); opacity: 0.5;">双击添加备注</span>'}</td>
                             <td>\${item.startDate}</td>
                             <td>\${item.endDate}</td>
                             <td class="number">\${formatNumber(item.totalAllowance)}</td>
@@ -2043,6 +2084,90 @@ const HTML_CONTENT = `
             }
         }
 
+        // Edit note - 双击编辑备注
+        async function editNote(id, currentNote) {
+            // 找到对应的单元格
+            const cell = document.querySelector('.note-cell[data-id="' + id + '"]');
+            if (!cell) return;
+
+            // 解码 HTML 实体
+            currentNote = currentNote.replace(/&#39;/g, "'");
+
+            // 保存原始内容
+            const originalHTML = cell.innerHTML;
+
+            // 创建输入框
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = currentNote;
+            input.style.width = '100%';
+
+            // 替换单元格内容为输入框
+            cell.innerHTML = '';
+            cell.appendChild(input);
+            input.focus();
+            input.select();
+
+            // 保存备注
+            async function saveNote() {
+                const newNote = input.value.trim();
+
+                try {
+                    const response = await fetch('/api/keys/' + id + '/note', {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ note: newNote })
+                    });
+
+                    if (response.ok) {
+                        // 更新 allData 中的备注
+                        if (allData) {
+                            const item = allData.data.find(item => item.id === id);
+                            if (item) {
+                                item.note = newNote || undefined;
+                            }
+                        }
+
+                        // 更新单元格显示
+                        if (newNote) {
+                            cell.textContent = newNote;
+                        } else {
+                            cell.innerHTML = '<span style="color: hsl(var(--muted-foreground)); opacity: 0.5;">双击添加备注</span>';
+                        }
+                    } else {
+                        alert('保存备注失败');
+                        cell.innerHTML = originalHTML;
+                    }
+                } catch (error) {
+                    alert('保存备注失败: ' + error.message);
+                    cell.innerHTML = originalHTML;
+                }
+            }
+
+            // 取消编辑
+            function cancelEdit() {
+                cell.innerHTML = originalHTML;
+            }
+
+            // 监听键盘事件
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    saveNote();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelEdit();
+                }
+            });
+
+            // 监听失焦事件（自动保存）
+            input.addEventListener('blur', () => {
+                saveNote();
+            });
+        }
+
         // Delete key from table - 从表格中删除密钥
         async function deleteKeyFromTable(id) {
             if (!confirm('确定要删除这个密钥吗？删除后需要刷新页面查看更新。')) {
@@ -2092,6 +2217,7 @@ const HTML_CONTENT = `
                 allData.data[index] = {
                     id: keyId,
                     key: keyInfo.masked,
+                    note: keyInfo.note,
                     loading: true,
                     totalAllowance: 0,
                     orgTotalTokensUsed: 0,
@@ -2321,16 +2447,16 @@ const HTML_CONTENT = `
                 return;
             }
 
-            // 显示统计信息（无需获取完整密钥，只显示数量）
-            let message = `找到 <strong>${totalInvalid}</strong> 个无效密钥`;
+            // 显示统计信息(无需获取完整密钥,只显示数量)
+            let message = '找到 <strong>' + totalInvalid + '</strong> 个无效密钥';
             if (failedItems.length > 0 && zeroBalanceItems.length > 0) {
-                message += ` (<strong>${failedItems.length}</strong> 个失效 + <strong>${zeroBalanceItems.length}</strong> 个零额度)`;
+                message += ' (<strong>' + failedItems.length + '</strong> 个失效 + <strong>' + zeroBalanceItems.length + '</strong> 个零额度)';
             } else if (failedItems.length > 0) {
-                message += ` (全部为失效密钥)`;
+                message += ' (全部为失效密钥)';
             } else {
-                message += ` (全部为零额度密钥)`;
+                message += ' (全部为零额度密钥)';
             }
-            info.innerHTML = `<iconify-icon icon="lucide:alert-triangle" style="color: hsl(var(--warning));"></iconify-icon> ${message}`;
+            info.innerHTML = '<iconify-icon icon="lucide:alert-triangle" style="color: hsl(var(--warning));"></iconify-icon> ' + message;
 
             // 设置提示信息：点击"复制全部"按钮时才会获取完整密钥
             textarea.value = '';
@@ -2393,7 +2519,7 @@ const HTML_CONTENT = `
             // 显示加载状态
             const originalBtnText = copyBtn.textContent;
             copyBtn.textContent = '获取中...';
-            info.innerHTML = `<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在获取 ${allInvalidItems.length} 个完整密钥...`;
+            info.innerHTML = '<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在获取 ' + allInvalidItems.length + ' 个完整密钥...';
 
             try {
                 const fullKeys = [];
@@ -2421,11 +2547,11 @@ const HTML_CONTENT = `
                 textarea.placeholder = '';
 
                 // 更新信息
-                let message = `找到 <strong>${fullKeys.length}</strong> 个无效密钥`;
+                let message = '找到 <strong>' + fullKeys.length + '</strong> 个无效密钥';
                 if (failedItems.length > 0 && zeroBalanceItems.length > 0) {
-                    message += ` (<strong>${failedItems.length}</strong> 个失效 + <strong>${zeroBalanceItems.length}</strong> 个零额度)`;
+                    message += ' (<strong>' + failedItems.length + '</strong> 个失效 + <strong>' + zeroBalanceItems.length + '</strong> 个零额度)';
                 }
-                info.innerHTML = `<iconify-icon icon="lucide:alert-triangle" style="color: hsl(var(--warning));"></iconify-icon> ${message}`;
+                info.innerHTML = '<iconify-icon icon="lucide:alert-triangle" style="color: hsl(var(--warning));"></iconify-icon> ' + message;
 
                 // 复制到剪贴板
                 await navigator.clipboard.writeText(textarea.value);
@@ -3042,6 +3168,7 @@ async function handler(req: Request): Promise<Response> {
       const safeKeys = keys.map(k => ({
         id: k.id,
         name: k.name,
+        note: k.note,  // 包含备注字段
         createdAt: k.createdAt,
         masked: `${k.key.substring(0, 4)}...${k.key.substring(k.key.length - 4)}`
       }));
@@ -3130,18 +3257,21 @@ async function handler(req: Request): Promise<Response> {
         });
       }
 
-      let deletedCount = 0;
-      const failedIds: string[] = [];
-
-      for (const id of ids) {
+      // 并行删除所有密钥，提升性能
+      const deletePromises = ids.map(async (id) => {
         try {
           await deleteApiKey(id);
-          deletedCount++;
+          return { id, success: true };
         } catch (error) {
-          failedIds.push(id);
           console.error(`Failed to delete key ${id}:`, error);
+          return { id, success: false };
         }
-      }
+      });
+
+      const results = await Promise.all(deletePromises);
+
+      const deletedCount = results.filter(r => r.success).length;
+      const failedIds = results.filter(r => !r.success).map(r => r.id);
 
       return new Response(JSON.stringify({
         success: true,
@@ -3286,6 +3416,47 @@ async function handler(req: Request): Promise<Response> {
 
       const usageData = await response.json();
       return new Response(JSON.stringify(usageData), { headers });
+    } catch (error) {
+      return new Response(JSON.stringify({ error: error.message }), {
+        status: 500,
+        headers,
+      });
+    }
+  }
+
+  // Update key note
+  if (url.pathname.match(/^\/api\/keys\/[^/]+\/note$/) && req.method === "PUT") {
+    try {
+      const pathParts = url.pathname.split("/");
+      const id = pathParts[pathParts.length - 2];
+
+      if (!id) {
+        return new Response(JSON.stringify({ error: "Key ID required" }), {
+          status: 400,
+          headers,
+        });
+      }
+
+      const body = await req.json();
+      const { note } = body;
+
+      // 获取现有密钥
+      const keyEntry = await getApiKey(id);
+      if (!keyEntry) {
+        return new Response(JSON.stringify({ error: "Key not found" }), {
+          status: 404,
+          headers,
+        });
+      }
+
+      // 更新密钥，保留原有信息并更新备注
+      const updatedEntry: ApiKeyEntry = {
+        ...keyEntry,
+        note: note || undefined,
+      };
+      await kv.set(["apikeys", id], updatedEntry);
+
+      return new Response(JSON.stringify({ success: true, note }), { headers });
     } catch (error) {
       return new Response(JSON.stringify({ error: error.message }), {
         status: 500,
