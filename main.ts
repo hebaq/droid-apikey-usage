@@ -1438,38 +1438,55 @@ const HTML_CONTENT = `
         </div>
     </div>
 
-    <!-- 导出零额度密钥弹窗 -->
-    <div class="export-zero-modal" id="exportZeroModal" style="display: none;">
+    <!-- 清理无效密钥弹窗 -->
+    <div class="export-zero-modal" id="exportInvalidModal" style="display: none;">
         <div class="export-zero-content">
-            <button class="close-btn" onclick="closeExportZeroModal()">
+            <button class="close-btn" onclick="closeExportInvalidModal()">
                 <iconify-icon icon="lucide:x"></iconify-icon>
             </button>
-            <div class="export-zero-header">
+            <div class="export-zero-header" style="background: hsl(var(--warning));">
                 <h2>
-                    <iconify-icon icon="lucide:file-down"></iconify-icon>
-                    零额度密钥列表
+                    <iconify-icon icon="lucide:trash-2"></iconify-icon>
+                    清理无效密钥
                 </h2>
             </div>
             <div class="export-zero-body">
-                <div class="export-zero-info" id="exportZeroInfo">
-                    正在加载零额度密钥...
+                <div class="export-zero-info" id="exportInvalidInfo">
+                    正在分析密钥状态...
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;">
+                    <div style="padding: 16px; background: hsl(var(--muted) / 0.3); border-radius: var(--radius); border: 1px solid hsl(var(--border));">
+                        <h4 style="margin: 0 0 12px 0; font-size: 14px; font-weight: 600; color: hsl(var(--destructive)); display: flex; align-items: center; gap: 8px;">
+                            <iconify-icon icon="lucide:alert-circle"></iconify-icon>
+                            失效密钥 (<span id="failedCount">0</span>)
+                        </h4>
+                        <p style="font-size: 13px; color: hsl(var(--muted-foreground)); margin: 0;">HTTP 401等错误，可能已被官方删除</p>
+                    </div>
+                    <div style="padding: 16px; background: hsl(var(--muted) / 0.3); border-radius: var(--radius); border: 1px solid hsl(var(--border));">
+                        <h4 style="margin: 0 0 12px 0; font-size: 14px; font-weight: 600; color: hsl(var(--warning)); display: flex; align-items: center; gap: 8px;">
+                            <iconify-icon icon="lucide:battery-low"></iconify-icon>
+                            零额度密钥 (<span id="zeroCount">0</span>)
+                        </h4>
+                        <p style="font-size: 13px; color: hsl(var(--muted-foreground)); margin: 0;">剩余额度 ≤ 0，已无可用额度</p>
+                    </div>
                 </div>
                 <textarea
                     class="export-zero-textarea"
-                    id="exportZeroTextarea"
+                    id="exportInvalidTextarea"
                     readonly
-                    placeholder="暂无零额度密钥">
+                    placeholder="暂无无效密钥"
+                    style="margin-top: 16px;">
                 </textarea>
             </div>
             <div class="export-zero-actions">
-                <button class="export-action-btn copy" onclick="copyZeroKeys()">
+                <button class="export-action-btn copy" onclick="copyInvalidKeys()">
                     <iconify-icon icon="lucide:copy"></iconify-icon>
-                    <span id="copyBtnText">复制全部</span>
+                    <span id="copyInvalidBtnText">复制全部</span>
                 </button>
-                <button class="export-action-btn clear" onclick="clearZeroBalanceKeysFromModal()">
-                    <span class="spinner" style="display: none;" id="modalClearSpinner"></span>
-                    <iconify-icon icon="lucide:trash-2" id="modalClearIcon"></iconify-icon>
-                    <span id="modalClearBtnText">清除这些密钥</span>
+                <button class="export-action-btn clear" onclick="clearInvalidKeysFromModal()">
+                    <span class="spinner" style="display: none;" id="modalInvalidClearSpinner"></span>
+                    <iconify-icon icon="lucide:trash-2" id="modalInvalidClearIcon"></iconify-icon>
+                    <span id="modalInvalidClearBtnText">清除这些密钥</span>
                 </button>
             </div>
         </div>
@@ -1512,9 +1529,9 @@ const HTML_CONTENT = `
         <span>导出有效密钥</span>
     </button>
 
-    <button class="export-zero-btn" onclick="openExportZeroModal()">
-        <iconify-icon icon="lucide:file-down"></iconify-icon>
-        <span>导出零额度</span>
+    <button class="export-zero-btn" onclick="openExportInvalidModal()">
+        <iconify-icon icon="lucide:trash-2"></iconify-icon>
+        <span>清理无效密钥</span>
     </button>
 
     <button class="refresh-btn" onclick="loadData()">
@@ -2265,42 +2282,55 @@ const HTML_CONTENT = `
             }
         }
 
-        // 打开导出零额度弹窗 - 直接从allData中获取，无需重新调用API
-        async function openExportZeroModal() {
+        // 打开清理无效密钥弹窗 - 合并失效密钥和零额度密钥
+        async function openExportInvalidModal() {
             if (!allData) {
                 alert('请先加载数据');
                 return;
             }
 
-            const modal = document.getElementById('exportZeroModal');
-            const textarea = document.getElementById('exportZeroTextarea');
-            const info = document.getElementById('exportZeroInfo');
+            const modal = document.getElementById('exportInvalidModal');
+            const textarea = document.getElementById('exportInvalidTextarea');
+            const info = document.getElementById('exportInvalidInfo');
+            const failedCountEl = document.getElementById('failedCount');
+            const zeroCountEl = document.getElementById('zeroCount');
 
             // 显示弹窗
             modal.style.display = 'flex';
 
-            // 直接从已有数据中筛选零额度密钥（剩余额度 ≤ 0）
+            // 筛选失效密钥（有错误的）
+            const failedItems = allData.data.filter(item => item.error);
+
+            // 筛选零额度密钥（剩余额度 ≤ 0）
             const zeroBalanceItems = allData.data.filter(item => {
                 if (item.error) return false;
                 const remaining = item.totalAllowance - item.orgTotalTokensUsed;
                 return remaining <= 0;
             });
 
-            if (zeroBalanceItems.length === 0) {
-                info.innerHTML = '<iconify-icon icon="lucide:check-circle" style="color: hsl(var(--success));\"></iconify-icon> 太棒了！没有零额度密钥';
+            // 更新计数
+            failedCountEl.textContent = failedItems.length;
+            zeroCountEl.textContent = zeroBalanceItems.length;
+
+            const totalInvalid = failedItems.length + zeroBalanceItems.length;
+
+            if (totalInvalid === 0) {
+                info.innerHTML = '<iconify-icon icon="lucide:check-circle" style="color: hsl(var(--success));"></iconify-icon> 太棒了！没有找到无效密钥';
                 textarea.value = '';
-                textarea.placeholder = '暂无零额度密钥';
+                textarea.placeholder = '暂无无效密钥';
                 return;
             }
 
             // 设置加载状态
-            info.innerHTML = \`<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在获取 \${zeroBalanceItems.length} 个零额度密钥...\`;
+            info.innerHTML = \`<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在获取 \${totalInvalid} 个无效密钥...\`;
             textarea.value = '';
 
             // 获取完整密钥
             try {
                 const fullKeys = [];
-                for (const item of zeroBalanceItems) {
+                const allInvalidItems = [...failedItems, ...zeroBalanceItems];
+
+                for (const item of allInvalidItems) {
                     try {
                         const response = await fetch(\`/api/keys/\${item.id}/full\`);
                         if (response.ok) {
@@ -2312,12 +2342,143 @@ const HTML_CONTENT = `
                     }
                 }
 
-                info.innerHTML = \`<iconify-icon icon="lucide:info" style="color: hsl(var(--warning));\"></iconify-icon> 找到 <strong>\${fullKeys.length}</strong> 个零额度密钥(剩余额度 ≤ 0)\`;
+                let message = \`找到 <strong>\${fullKeys.length}</strong> 个无效密钥\`;
+                if (failedItems.length > 0 && zeroBalanceItems.length > 0) {
+                    message += \` (<strong>\${failedItems.length}</strong> 个失效 + <strong>\${zeroBalanceItems.length}</strong> 个零额度)\`;
+                }
+                info.innerHTML = \`<iconify-icon icon="lucide:alert-triangle" style="color: hsl(var(--warning));"></iconify-icon> \${message}\`;
                 textarea.value = fullKeys.join('\\n');
                 textarea.placeholder = '';
             } catch (error) {
-                info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--destructive));\"></iconify-icon> 加载失败: ' + error.message;
+                info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--destructive));"></iconify-icon> 加载失败: ' + error.message;
                 textarea.value = '';
+            }
+        }
+
+        // 关闭清理无效密钥弹窗
+        function closeExportInvalidModal() {
+            const modal = document.getElementById('exportInvalidModal');
+            modal.style.display = 'none';
+        }
+
+        // 复制无效密钥
+        async function copyInvalidKeys() {
+            const textarea = document.getElementById('exportInvalidTextarea');
+            const copyBtn = document.getElementById('copyInvalidBtnText');
+
+            if (!textarea.value) {
+                alert('没有可复制的内容');
+                return;
+            }
+
+            try {
+                await navigator.clipboard.writeText(textarea.value);
+
+                // 更新按钮文字
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = '已复制!';
+
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                }, 2000);
+            } catch (error) {
+                // 降级方案：使用传统的复制方法
+                textarea.select();
+                document.execCommand('copy');
+
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = '已复制!';
+
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                }, 2000);
+            }
+        }
+
+        // 清除无效密钥（包括失效密钥和零额度密钥）
+        async function clearInvalidKeysFromModal() {
+            if (!allData) {
+                alert('请先加载数据');
+                return;
+            }
+
+            // 找出失效密钥（有错误的）
+            const failedKeys = allData.data.filter(item => item.error);
+
+            // 找出零额度密钥（剩余额度 ≤ 0）
+            const zeroBalanceKeys = allData.data.filter(item => {
+                if (item.error) return false;
+                const remaining = item.totalAllowance - item.orgTotalTokensUsed;
+                return remaining <= 0;
+            });
+
+            const allInvalidKeys = [...failedKeys, ...zeroBalanceKeys];
+
+            if (allInvalidKeys.length === 0) {
+                alert('没有需要清除的无效密钥');
+                return;
+            }
+
+            let confirmMsg = \`确定要删除 \${allInvalidKeys.length} 个无效密钥吗？\`;
+            if (failedKeys.length > 0 && zeroBalanceKeys.length > 0) {
+                confirmMsg += \`\\n\\n包括:\\n- \${failedKeys.length} 个失效密钥(HTTP 401等错误)\\n- \${zeroBalanceKeys.length} 个零额度密钥(剩余额度≤0)\`;
+            } else if (failedKeys.length > 0) {
+                confirmMsg += \`\\n\\n这些密钥因 HTTP 401 等错误无法加载，可能已被官方删除。\`;
+            } else {
+                confirmMsg += \`\\n\\n这些密钥的剩余额度已 ≤ 0。\`;
+            }
+            confirmMsg += \`\\n\\n此操作不可恢复！\`;
+
+            if (!confirm(confirmMsg)) {
+                return;
+            }
+
+            const clearSpinner = document.getElementById('modalInvalidClearSpinner');
+            const clearIcon = document.getElementById('modalInvalidClearIcon');
+            const clearBtnText = document.getElementById('modalInvalidClearBtnText');
+
+            clearSpinner.style.display = 'inline-block';
+            clearIcon.style.display = 'none';
+            clearBtnText.textContent = '清除中...';
+
+            try {
+                // 使用批量删除 API
+                const ids = allInvalidKeys.map(item => item.id);
+                const response = await fetch('/api/keys/batch-delete', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ ids })
+                });
+
+                const result = await response.json();
+
+                clearSpinner.style.display = 'none';
+                clearIcon.style.display = 'inline-block';
+                clearBtnText.textContent = '清除这些密钥';
+
+                if (response.ok) {
+                    const failedCount = result.failedIds?.length || 0;
+                    let message = \`清除完成！\\n成功删除: \${result.deletedCount} 个\`;
+                    if (failedCount > 0) {
+                        message += \`\\n失败: \${failedCount} 个\`;
+                    }
+                    alert(message);
+
+                    // 关闭弹窗
+                    closeExportInvalidModal();
+
+                    // 重新加载数据
+                    loadData();
+                } else {
+                    alert('清除失败: ' + result.error);
+                }
+            } catch (error) {
+                clearSpinner.style.display = 'none';
+                clearIcon.style.display = 'inline-block';
+                clearBtnText.textContent = '清除这些密钥';
+                alert('清除失败: ' + error.message);
             }
         }
 
@@ -2445,50 +2606,10 @@ const HTML_CONTENT = `
             }
         }
 
-        // 关闭导出零额度弹窗
-        function closeExportZeroModal() {
-            const modal = document.getElementById('exportZeroModal');
-            modal.style.display = 'none';
-        }
-
         // 关闭导出有效密钥弹窗
         function closeExportValidModal() {
             const modal = document.getElementById('exportValidModal');
             modal.style.display = 'none';
-        }
-
-        // 复制零额度密钥
-        async function copyZeroKeys() {
-            const textarea = document.getElementById('exportZeroTextarea');
-            const copyBtn = document.getElementById('copyBtnText');
-
-            if (!textarea.value) {
-                alert('没有可复制的内容');
-                return;
-            }
-
-            try {
-                await navigator.clipboard.writeText(textarea.value);
-
-                // 更新按钮文字
-                const originalText = copyBtn.textContent;
-                copyBtn.textContent = '已复制!';
-
-                setTimeout(() => {
-                    copyBtn.textContent = originalText;
-                }, 2000);
-            } catch (error) {
-                // 降级方案：使用传统的复制方法
-                textarea.select();
-                document.execCommand('copy');
-
-                const originalText = copyBtn.textContent;
-                copyBtn.textContent = '已复制!';
-
-                setTimeout(() => {
-                    copyBtn.textContent = originalText;
-                }, 2000);
-            }
         }
 
         // 复制有效密钥
@@ -2523,71 +2644,6 @@ const HTML_CONTENT = `
                     copyBtn.textContent = originalText;
                 }, 2000);
             }
-        }
-
-        // 从弹窗中清除零额度密钥
-        async function clearZeroBalanceKeysFromModal() {
-            if (!allData) {
-                alert('请先加载数据');
-                return;
-            }
-
-            // 找出剩余额度小于等于0的密钥
-            const zeroBalanceKeys = allData.data.filter(item => {
-                if (item.error) return false;
-                const remaining = item.totalAllowance - item.orgTotalTokensUsed;
-                return remaining <= 0;
-            });
-
-            if (zeroBalanceKeys.length === 0) {
-                alert('没有需要清除的零额度密钥');
-                return;
-            }
-
-            if (!confirm(\`确定要删除 \${zeroBalanceKeys.length} 个零额度或负额度的密钥吗？此操作不可恢复！\`)) {
-                return;
-            }
-
-            const clearSpinner = document.getElementById('modalClearSpinner');
-            const clearIcon = document.getElementById('modalClearIcon');
-            const clearBtnText = document.getElementById('modalClearBtnText');
-
-            clearSpinner.style.display = 'inline-block';
-            clearIcon.style.display = 'none';
-            clearBtnText.textContent = '清除中...';
-
-            let successCount = 0;
-            let failCount = 0;
-
-            // 批量删除
-            for (const item of zeroBalanceKeys) {
-                try {
-                    const response = await fetch(\`/api/keys/\${item.id}\`, {
-                        method: 'DELETE'
-                    });
-
-                    if (response.ok) {
-                        successCount++;
-                    } else {
-                        failCount++;
-                    }
-                } catch (error) {
-                    failCount++;
-                    console.error(\`Failed to delete key \${item.id}:\`, error);
-                }
-            }
-
-            clearSpinner.style.display = 'none';
-            clearIcon.style.display = 'inline-block';
-            clearBtnText.textContent = '清除这些密钥';
-
-            alert(\`清除完成！\\n成功删除: \${successCount} 个\\n失败: \${failCount} 个\`);
-
-            // 关闭弹窗
-            closeExportZeroModal();
-
-            // 重新加载数据
-            loadData();
         }
 
         // 自动刷新功能
@@ -2996,6 +3052,103 @@ async function handler(req: Request): Promise<Response> {
         success: true,
         deletedCount,
         message: `Successfully deleted ${deletedCount} duplicate keys`
+      }), { headers });
+    } catch (error) {
+      return new Response(JSON.stringify({ error: error.message }), {
+        status: 500,
+        headers,
+      });
+    }
+  }
+
+  // Batch delete keys by IDs
+  if (url.pathname === "/api/keys/batch-delete" && req.method === "POST") {
+    try {
+      const body = await req.json();
+      const ids = body.ids as string[];
+
+      if (!Array.isArray(ids)) {
+        return new Response(JSON.stringify({ error: "Invalid request: 'ids' must be an array" }), {
+          status: 400,
+          headers,
+        });
+      }
+
+      let deletedCount = 0;
+      const failedIds: string[] = [];
+
+      for (const id of ids) {
+        try {
+          await deleteApiKey(id);
+          deletedCount++;
+        } catch (error) {
+          failedIds.push(id);
+          console.error(`Failed to delete key ${id}:`, error);
+        }
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        deletedCount,
+        totalRequested: ids.length,
+        failedIds,
+        message: `Successfully deleted ${deletedCount} out of ${ids.length} keys`
+      }), { headers });
+    } catch (error) {
+      return new Response(JSON.stringify({ error: error.message }), {
+        status: 500,
+        headers,
+      });
+    }
+  }
+
+  // Batch delete zero balance keys
+  if (url.pathname === "/api/keys/zero-balance/delete" && req.method === "POST") {
+    try {
+      const allKeys = await getAllApiKeys();
+      const keysToDelete: string[] = [];
+
+      // Check each key's balance
+      for (const keyEntry of allKeys) {
+        try {
+          const response = await fetch('https://app.factory.ai/api/organization/members/chat-usage', {
+            headers: {
+              'Authorization': `Bearer ${keyEntry.key}`,
+              'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+            }
+          });
+
+          if (response.ok) {
+            const usageData = await response.json();
+            const standardUsage = usageData.usage?.standard;
+            if (standardUsage) {
+              const remaining = standardUsage.totalAllowance - standardUsage.orgTotalTokensUsed;
+              if (remaining <= 0) {
+                keysToDelete.push(keyEntry.id);
+              }
+            }
+          }
+        } catch (error) {
+          console.error(`Failed to check balance for key ${keyEntry.id}:`, error);
+        }
+      }
+
+      // Delete identified keys
+      let deletedCount = 0;
+      for (const id of keysToDelete) {
+        try {
+          await deleteApiKey(id);
+          deletedCount++;
+        } catch (error) {
+          console.error(`Failed to delete key ${id}:`, error);
+        }
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        deletedCount,
+        totalZeroBalance: keysToDelete.length,
+        message: `Successfully deleted ${deletedCount} zero balance keys`
       }), { headers });
     } catch (error) {
       return new Response(JSON.stringify({ error: error.message }), {
