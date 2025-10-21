@@ -2282,7 +2282,7 @@ const HTML_CONTENT = `
             }
         }
 
-        // 打开清理无效密钥弹窗 - 合并失效密钥和零额度密钥
+        // 打开清理无效密钥弹窗 - 直接从allData中获取，无需重新调用API
         async function openExportInvalidModal() {
             if (!allData) {
                 alert('请先加载数据');
@@ -2298,10 +2298,10 @@ const HTML_CONTENT = `
             // 显示弹窗
             modal.style.display = 'flex';
 
-            // 筛选失效密钥（有错误的）
+            // 直接从已加载的数据中筛选失效密钥（有错误的）
             const failedItems = allData.data.filter(item => item.error);
 
-            // 筛选零额度密钥（剩余额度 ≤ 0）
+            // 直接从已加载的数据中筛选零额度密钥（剩余额度 ≤ 0）
             const zeroBalanceItems = allData.data.filter(item => {
                 if (item.error) return false;
                 const remaining = item.totalAllowance - item.orgTotalTokensUsed;
@@ -2321,15 +2321,82 @@ const HTML_CONTENT = `
                 return;
             }
 
-            // 设置加载状态
-            info.innerHTML = \`<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在获取 \${totalInvalid} 个无效密钥...\`;
-            textarea.value = '';
+            // 显示统计信息（无需获取完整密钥，只显示数量）
+            let message = `找到 <strong>${totalInvalid}</strong> 个无效密钥`;
+            if (failedItems.length > 0 && zeroBalanceItems.length > 0) {
+                message += ` (<strong>${failedItems.length}</strong> 个失效 + <strong>${zeroBalanceItems.length}</strong> 个零额度)`;
+            } else if (failedItems.length > 0) {
+                message += ` (全部为失效密钥)`;
+            } else {
+                message += ` (全部为零额度密钥)`;
+            }
+            info.innerHTML = `<iconify-icon icon="lucide:alert-triangle" style="color: hsl(var(--warning));"></iconify-icon> ${message}`;
 
-            // 获取完整密钥
+            // 设置提示信息：点击"复制全部"按钮时才会获取完整密钥
+            textarea.value = '';
+            textarea.placeholder = '点击下方"复制全部"按钮获取完整密钥列表...';
+        }
+
+        // 关闭清理无效密钥弹窗
+        function closeExportInvalidModal() {
+            const modal = document.getElementById('exportInvalidModal');
+            modal.style.display = 'none';
+        }
+
+        // 复制无效密钥 - 按需获取完整密钥
+        async function copyInvalidKeys() {
+            const textarea = document.getElementById('exportInvalidTextarea');
+            const copyBtn = document.getElementById('copyInvalidBtnText');
+            const info = document.getElementById('exportInvalidInfo');
+
+            if (!allData) {
+                alert('请先加载数据');
+                return;
+            }
+
+            // 如果已经有密钥内容，直接复制
+            if (textarea.value && textarea.value.length > 0 && !textarea.value.includes('点击')) {
+                try {
+                    await navigator.clipboard.writeText(textarea.value);
+                    const originalText = copyBtn.textContent;
+                    copyBtn.textContent = '已复制!';
+                    setTimeout(() => {
+                        copyBtn.textContent = originalText;
+                    }, 2000);
+                } catch (error) {
+                    textarea.select();
+                    document.execCommand('copy');
+                    const originalText = copyBtn.textContent;
+                    copyBtn.textContent = '已复制!';
+                    setTimeout(() => {
+                        copyBtn.textContent = originalText;
+                    }, 2000);
+                }
+                return;
+            }
+
+            // 如果还没有获取完整密钥，现在获取
+            const failedItems = allData.data.filter(item => item.error);
+            const zeroBalanceItems = allData.data.filter(item => {
+                if (item.error) return false;
+                const remaining = item.totalAllowance - item.orgTotalTokensUsed;
+                return remaining <= 0;
+            });
+
+            const allInvalidItems = [...failedItems, ...zeroBalanceItems];
+
+            if (allInvalidItems.length === 0) {
+                alert('没有可复制的内容');
+                return;
+            }
+
+            // 显示加载状态
+            const originalBtnText = copyBtn.textContent;
+            copyBtn.textContent = '获取中...';
+            info.innerHTML = `<iconify-icon icon="lucide:loader-2" style="animation: spin 1s linear infinite;"></iconify-icon> 正在获取 ${allInvalidItems.length} 个完整密钥...`;
+
             try {
                 const fullKeys = [];
-                const allInvalidItems = [...failedItems, ...zeroBalanceItems];
-
                 for (const item of allInvalidItems) {
                     try {
                         const response = await fetch(\`/api/keys/\${item.id}/full\`);
@@ -2342,55 +2409,44 @@ const HTML_CONTENT = `
                     }
                 }
 
-                let message = \`找到 <strong>\${fullKeys.length}</strong> 个无效密钥\`;
-                if (failedItems.length > 0 && zeroBalanceItems.length > 0) {
-                    message += \` (<strong>\${failedItems.length}</strong> 个失效 + <strong>\${zeroBalanceItems.length}</strong> 个零额度)\`;
+                if (fullKeys.length === 0) {
+                    alert('无法获取完整密钥');
+                    copyBtn.textContent = originalBtnText;
+                    info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--destructive));"></iconify-icon> 获取完整密钥失败';
+                    return;
                 }
-                info.innerHTML = \`<iconify-icon icon="lucide:alert-triangle" style="color: hsl(var(--warning));"></iconify-icon> \${message}\`;
+
+                // 更新textarea内容
                 textarea.value = fullKeys.join('\\n');
                 textarea.placeholder = '';
-            } catch (error) {
-                info.innerHTML = '<iconify-icon icon="lucide:alert-circle" style="color: hsl(var(--destructive));"></iconify-icon> 加载失败: ' + error.message;
-                textarea.value = '';
-            }
-        }
 
-        // 关闭清理无效密钥弹窗
-        function closeExportInvalidModal() {
-            const modal = document.getElementById('exportInvalidModal');
-            modal.style.display = 'none';
-        }
+                // 更新信息
+                let message = `找到 <strong>${fullKeys.length}</strong> 个无效密钥`;
+                if (failedItems.length > 0 && zeroBalanceItems.length > 0) {
+                    message += ` (<strong>${failedItems.length}</strong> 个失效 + <strong>${zeroBalanceItems.length}</strong> 个零额度)`;
+                }
+                info.innerHTML = `<iconify-icon icon="lucide:alert-triangle" style="color: hsl(var(--warning));"></iconify-icon> ${message}`;
 
-        // 复制无效密钥
-        async function copyInvalidKeys() {
-            const textarea = document.getElementById('exportInvalidTextarea');
-            const copyBtn = document.getElementById('copyInvalidBtnText');
-
-            if (!textarea.value) {
-                alert('没有可复制的内容');
-                return;
-            }
-
-            try {
+                // 复制到剪贴板
                 await navigator.clipboard.writeText(textarea.value);
-
-                // 更新按钮文字
-                const originalText = copyBtn.textContent;
                 copyBtn.textContent = '已复制!';
-
                 setTimeout(() => {
-                    copyBtn.textContent = originalText;
+                    copyBtn.textContent = originalBtnText;
                 }, 2000);
-            } catch (error) {
-                // 降级方案：使用传统的复制方法
-                textarea.select();
-                document.execCommand('copy');
 
-                const originalText = copyBtn.textContent;
-                copyBtn.textContent = '已复制!';
+            } catch (error) {
+                // 降级方案
+                if (textarea.value) {
+                    textarea.select();
+                    document.execCommand('copy');
+                    copyBtn.textContent = '已复制!';
+                } else {
+                    alert('复制失败: ' + error.message);
+                    copyBtn.textContent = originalBtnText;
+                }
 
                 setTimeout(() => {
-                    copyBtn.textContent = originalText;
+                    copyBtn.textContent = originalBtnText;
                 }, 2000);
             }
         }
